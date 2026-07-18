@@ -43,9 +43,21 @@ export const api = {
   async updateLastLogin(id: string): Promise<void> { return invoke("update_last_login", { id }); },
   async getClientPassword(id: string): Promise<string> { return invoke("get_client_password", { id }); },
 
-  // AWS CLI
+  // AWS CLI & SSO
   async generateAwsConfig(): Promise<string> { return invoke("generate_aws_config"); },
   async getAwsProfiles(): Promise<string[]> { return invoke("get_aws_profiles"); },
+  async refreshSsoToken(profile: string): Promise<{ profile: string; success: boolean; message: string }> {
+    return invoke("refresh_sso_token", { profile });
+  },
+  async refreshAllSsoTokens(): Promise<{ profile: string; success: boolean; message: string }[]> {
+    return invoke("refresh_all_sso_tokens");
+  },
+  async getSsoCredentials(profile: string): Promise<string> {
+    return invoke("get_sso_credentials", { profile });
+  },
+  async exportCredentialsEnv(profile: string): Promise<string> {
+    return invoke("export_credentials_env", { profile });
+  },
 
   // Session Management
   async getSessionStatus(id: string): Promise<string> { return invoke("get_session_status", { id }); },

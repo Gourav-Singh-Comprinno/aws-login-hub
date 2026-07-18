@@ -57,6 +57,38 @@ export default function Terminal() {
     }
   }
 
+  async function handleRefreshToken() {
+    if (!selectedProfile) return;
+    setRunning(true);
+    setHistory(h => [...h, { type: "input", text: `$ aws sso login --profile ${selectedProfile}` }]);
+    try {
+      const result = await api.refreshSsoToken(selectedProfile);
+      setHistory(h => [...h, {
+        type: result.success ? "output" : "error",
+        text: result.message
+      }]);
+    } catch (err) {
+      setHistory(h => [...h, { type: "error", text: String(err) }]);
+    }
+    setRunning(false);
+  }
+
+  async function handleExportCreds() {
+    if (!selectedProfile) return;
+    setRunning(true);
+    setHistory(h => [...h, { type: "input", text: `$ aws configure export-credentials --profile ${selectedProfile} --format env` }]);
+    try {
+      const creds = await api.exportCredentialsEnv(selectedProfile);
+      setHistory(h => [...h, {
+        type: "output",
+        text: `Temporary credentials for '${selectedProfile}':\n\n${creds}\nPaste these in any terminal to use this profile's credentials.`
+      }]);
+    } catch (err) {
+      setHistory(h => [...h, { type: "error", text: String(err) }]);
+    }
+    setRunning(false);
+  }
+
   return (
     <div className="p-8 h-full overflow-auto flex flex-col">
       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-5">
@@ -77,7 +109,13 @@ export default function Terminal() {
           </select>
         </div>
         <button onClick={handleGenerateProfiles} className="btn-glass text-[12px] whitespace-nowrap">
-          Generate AWS Config
+          Sync Profiles
+        </button>
+        <button onClick={handleRefreshToken} disabled={!selectedProfile || running} className="btn-glass text-[12px] whitespace-nowrap">
+          Refresh Token
+        </button>
+        <button onClick={handleExportCreds} disabled={!selectedProfile || running} className="btn-glass text-[12px] whitespace-nowrap">
+          Get Credentials
         </button>
         <button onClick={handleClear} className="btn-glass text-[12px]" title="Clear">
           <Trash2 size={14} />
