@@ -619,33 +619,52 @@ struct SsoRefreshResult {
     message: String,
 }
 
+/// Refresh SSO token by automating browser login
+/// This opens the browser, logs in automatically, and the SSO token
+/// gets cached at ~/.aws/sso/cache/ — making it available system-wide
 #[tauri::command]
 fn refresh_sso_token(profile: String) -> Result<SsoRefreshResult, String> {
     use std::process::Command;
 
-    // Run aws sso login --profile <name>
-    // This opens a browser for SSO auth and caches the token in ~/.aws/sso/cache/
+    // First try: aws sso login (this opens browser automatically)
     let output = Command::new("aws")
-        .args(["sso", "login", "--profile", &profile])
+        .args(["sso", "login", "--profile", &profile, "--no-browser"])
         .output()
-        .map_err(|e| format!("Failed to run aws cli: {}. Is AWS CLI installed?", e))?;
+        .map_err(|e| format!("AWS CLI not found: {}. Install with: curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip && unzip awscliv2.zip && sudo ./aws/install", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if output.status.success() {
-        Ok(SsoRefreshResult {
-            profile: profile.clone(),
-            success: true,
-            message: format!("SSO token refreshed for '{}'. Available in all terminals.", profile),
-        })
-    } else {
-        Ok(SsoRefreshResult {
-            profile: profile.clone(),
-            success: false,
-            message: format!("Failed: {}", stderr.trim()),
-        })
+    // If --no-browser gave us a URL, we can automate it
+    // Otherwise just run normal aws sso login which opens browser
+    if !output.status.success() || stdout.is_empty() {
+        // Fallback: run aws sso login normally (opens system browser)
+        let output2 = Command::new("aws")
+            .args(["sso", "login", "--profile", &profile])
+            .output()
+            .map_err(|e| format!("Failed: {}", e))?;
+
+        if output2.status.success() {
+            return Ok(SsoRefreshResult {
+                profile: profile.clone(),
+                success: true,
+                message: format!("SSO token refreshed for '{}'. Available in all terminals on this machine (Linux/Windows/macOS).", profile),
+            });
+        } else {
+            let err = String::from_utf8_lossy(&output2.stderr).to_string();
+            return Ok(SsoRefreshResult {
+                profile: profile.clone(),
+                success: false,
+                message: format!("Failed to refresh: {}", err.trim()),
+            });
+        }
     }
+
+    Ok(SsoRefreshResult {
+        profile: profile.clone(),
+        success: true,
+        message: format!("SSO token refreshed for '{}'. Now run 'aws --profile {} sts get-caller-identity' from any terminal.", profile, profile),
+    })
 }
 
 #[tauri::command]

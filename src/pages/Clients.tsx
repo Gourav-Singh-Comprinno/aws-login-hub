@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Search, Star, Play, Edit2, Trash2, X, Loader2, Globe, Mail } from "lucide-react";
+import { Plus, Search, Star, Play, Edit2, Trash2, X, Loader2, Globe, Mail, RefreshCw } from "lucide-react";
 import { api } from "../services/api";
 import { performLogin, type LoginProgress } from "../services/login";
 import type { Client, CreateClientRequest } from "../types";
@@ -12,6 +12,7 @@ export default function Clients() {
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [loginProgress, setLoginProgress] = useState<{ id: string; progress: LoginProgress } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshingAll, setRefreshingAll] = useState(false);
 
   useEffect(() => { loadClients(); }, []);
   useEffect(() => { const t = setTimeout(loadClients, 300); return () => clearTimeout(t); }, [searchQuery]);
@@ -35,6 +36,28 @@ export default function Clients() {
     });
   }
 
+  async function handleRefreshAllTokens() {
+    setRefreshingAll(true);
+    try {
+      // First sync profiles to ~/.aws/config
+      await api.generateAwsConfig();
+      // Then login to each client via browser automation to refresh SSO tokens
+      for (const client of clients) {
+        setLoginProgress({ id: client.id, progress: { step: "launching", message: "Refreshing token..." } });
+        await performLogin(client, (p) => {
+          setLoginProgress({ id: client.id, progress: p });
+        });
+        // Small delay between clients
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      setLoginProgress(null);
+    } catch (err) {
+      console.error(err);
+    }
+    setRefreshingAll(false);
+    loadClients();
+  }
+
   return (
     <div className="p-8 h-full overflow-auto">
       {/* Header */}
@@ -43,9 +66,15 @@ export default function Clients() {
           <h1 className="text-3xl font-bold text-white tracking-tight">Clients</h1>
           <p className="text-zinc-500 text-sm mt-1">{clients.length} configured</p>
         </div>
-        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setShowAddForm(true)} className="btn-accent flex items-center gap-2 text-[13px]">
-          <Plus size={16} /> Add Client
-        </motion.button>
+        <div className="flex items-center gap-3">
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleRefreshAllTokens} disabled={refreshingAll} className="btn-glass flex items-center gap-2 text-[13px]">
+            {refreshingAll ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            {refreshingAll ? "Refreshing..." : "Refresh All Tokens"}
+          </motion.button>
+          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setShowAddForm(true)} className="btn-accent flex items-center gap-2 text-[13px]">
+            <Plus size={16} /> Add Client
+          </motion.button>
+        </div>
       </motion.div>
 
       {/* Search */}
