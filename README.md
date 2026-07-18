@@ -223,6 +223,60 @@ Without this, the app will work for storing credentials but the "Login" button w
 
 ---
 
+### ✅ Verify Installation
+
+After installing on any OS, verify it works:
+
+**Linux:**
+```bash
+# Check it's installed
+which aws-login-hub
+
+# Run it
+aws-login-hub
+```
+You'll also find "AWS Login Hub" in your application menu (Activities → search "AWS Login Hub").
+
+**Windows:**
+- Open Start Menu → search "AWS Login Hub" → click to open
+- Or press `Win + S`, type "AWS Login Hub"
+
+**macOS:**
+- Open Spotlight (`Cmd + Space`) → type "AWS Login Hub" → press Enter
+- Or find it in Launchpad
+
+---
+
+### 🗑️ Uninstall
+
+**Ubuntu/Debian:**
+```bash
+sudo apt remove aws-login-hub
+```
+
+**Fedora/RHEL:**
+```bash
+sudo rpm -e aws-login-hub
+```
+
+**AppImage:**
+```bash
+rm aws-login-hub_0.2.0_amd64.AppImage
+```
+
+**Windows:**
+- Settings → Apps → search "AWS Login Hub" → Uninstall
+
+**macOS:**
+- Drag from Applications to Trash
+
+**Remove vault data (all platforms):**
+```bash
+rm -rf ~/.aws-login-hub
+```
+
+---
+
 ## 🛠️ Build From Source
 
 ### Prerequisites
