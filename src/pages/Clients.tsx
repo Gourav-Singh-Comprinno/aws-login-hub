@@ -163,7 +163,11 @@ export default function Clients() {
 function ClientFormModal({ client, onClose, onSaved }: { client: Client | null; onClose: () => void; onSaved: () => void }) {
   const [form, setForm] = useState<CreateClientRequest>({
     name: client?.name ?? "", identity_center_url: client?.identity_center_url ?? "",
-    email: client?.email ?? "", password: "", notes: client?.notes ?? "",
+    email: client?.email ?? "", password: "",
+    sso_region: client?.sso_region ?? "us-east-1",
+    sso_account_id: client?.sso_account_id ?? "",
+    sso_role_name: client?.sso_role_name ?? "",
+    notes: client?.notes ?? "",
     tags: client?.tags ?? "", environment: client?.environment ?? "",
   });
   const [saving, setSaving] = useState(false);
@@ -209,6 +213,12 @@ function ClientFormModal({ client, onClose, onSaved }: { client: Client | null; 
           <Field label="Identity Center URL" placeholder="https://d-xxxxxxxxxx.awsapps.com/start" value={form.identity_center_url} onChange={v => setForm({...form, identity_center_url: v})} icon={<Globe size={14} />} />
           <Field label="Email" placeholder="user@company.com" type="email" value={form.email} onChange={v => setForm({...form, email: v})} icon={<Mail size={14} />} />
           <Field label={client ? "Password (leave empty to keep)" : "Password"} placeholder="••••••••" type="password" value={form.password} onChange={v => setForm({...form, password: v})} />
+
+          <div className="grid grid-cols-3 gap-3">
+            <Field label="SSO Region" placeholder="us-east-1" value={form.sso_region || ""} onChange={v => setForm({...form, sso_region: v})} />
+            <Field label="Account ID" placeholder="123456789012" value={form.sso_account_id || ""} onChange={v => setForm({...form, sso_account_id: v})} />
+            <Field label="Role Name" placeholder="AdministratorAccess" value={form.sso_role_name || ""} onChange={v => setForm({...form, sso_role_name: v})} />
+          </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>

@@ -19,6 +19,9 @@ pub struct Client {
     pub name: String,
     pub identity_center_url: String,
     pub email: String,
+    pub sso_region: String,
+    pub sso_account_id: String,
+    pub sso_role_name: String,
     pub notes: String,
     pub tags: String,
     pub environment: String,
@@ -35,6 +38,9 @@ pub struct CreateClientRequest {
     pub identity_center_url: String,
     pub email: String,
     pub password: String,
+    pub sso_region: Option<String>,
+    pub sso_account_id: Option<String>,
+    pub sso_role_name: Option<String>,
     pub notes: Option<String>,
     pub tags: Option<String>,
     pub environment: Option<String>,
@@ -46,6 +52,9 @@ pub struct UpdateClientRequest {
     pub identity_center_url: Option<String>,
     pub email: Option<String>,
     pub password: Option<String>,
+    pub sso_region: Option<String>,
+    pub sso_account_id: Option<String>,
+    pub sso_role_name: Option<String>,
     pub notes: Option<String>,
     pub tags: Option<String>,
     pub environment: Option<String>,
@@ -96,6 +105,9 @@ fn init_user_db(path: &std::path::Path) -> Connection {
             name TEXT NOT NULL,
             identity_center_url TEXT NOT NULL,
             email TEXT NOT NULL,
+            sso_region TEXT DEFAULT 'us-east-1',
+            sso_account_id TEXT DEFAULT '',
+            sso_role_name TEXT DEFAULT '',
             notes TEXT DEFAULT '',
             tags TEXT DEFAULT '',
             environment TEXT DEFAULT '',
@@ -108,6 +120,10 @@ fn init_user_db(path: &std::path::Path) -> Connection {
         CREATE INDEX IF NOT EXISTS idx_clients_favorite ON clients(favorite);
         CREATE INDEX IF NOT EXISTS idx_clients_last_login ON clients(last_login);
     ").expect("Failed to init user database");
+    // Migration: add columns if missing (for existing databases)
+    conn.execute("ALTER TABLE clients ADD COLUMN sso_region TEXT DEFAULT 'us-east-1'", []).ok();
+    conn.execute("ALTER TABLE clients ADD COLUMN sso_account_id TEXT DEFAULT ''", []).ok();
+    conn.execute("ALTER TABLE clients ADD COLUMN sso_role_name TEXT DEFAULT ''", []).ok();
     conn
 }
 
@@ -117,18 +133,21 @@ fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<Client> {
         name: row.get(1)?,
         identity_center_url: row.get(2)?,
         email: row.get(3)?,
-        notes: row.get::<_, String>(4).unwrap_or_default(),
-        tags: row.get::<_, String>(5).unwrap_or_default(),
-        environment: row.get::<_, String>(6).unwrap_or_default(),
-        favorite: row.get::<_, i32>(7).unwrap_or(0) != 0,
-        last_login: row.get::<_, Option<String>>(8).unwrap_or(None),
-        status: row.get::<_, String>(9).unwrap_or_else(|_| "never".to_string()),
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
+        sso_region: row.get::<_, String>(4).unwrap_or_else(|_| "us-east-1".to_string()),
+        sso_account_id: row.get::<_, String>(5).unwrap_or_default(),
+        sso_role_name: row.get::<_, String>(6).unwrap_or_default(),
+        notes: row.get::<_, String>(7).unwrap_or_default(),
+        tags: row.get::<_, String>(8).unwrap_or_default(),
+        environment: row.get::<_, String>(9).unwrap_or_default(),
+        favorite: row.get::<_, i32>(10).unwrap_or(0) != 0,
+        last_login: row.get::<_, Option<String>>(11).unwrap_or(None),
+        status: row.get::<_, String>(12).unwrap_or_else(|_| "never".to_string()),
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
-const COLS: &str = "id, name, identity_center_url, email, notes, tags, environment, favorite, last_login, status, created_at, updated_at";
+const COLS: &str = "id, name, identity_center_url, email, sso_region, sso_account_id, sso_role_name, notes, tags, environment, favorite, last_login, status, created_at, updated_at";
 
 // Helper: get active DB or error
 fn with_db<F, R>(state: &State<AppState>, f: F) -> Result<R, String>
@@ -242,6 +261,9 @@ fn get_client(state: State<AppState>, id: String) -> Result<Client, String> {
 fn create_client(state: State<AppState>, request: CreateClientRequest) -> Result<Client, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
+    let sso_region = request.sso_region.unwrap_or_else(|| "us-east-1".to_string());
+    let sso_account_id = request.sso_account_id.unwrap_or_default();
+    let sso_role_name = request.sso_role_name.unwrap_or_default();
     let notes = request.notes.unwrap_or_default();
     let tags = request.tags.unwrap_or_default();
     let environment = request.environment.unwrap_or_default();
@@ -256,12 +278,13 @@ fn create_client(state: State<AppState>, request: CreateClientRequest) -> Result
 
     with_db(&state, |db| {
         db.execute(
-            "INSERT INTO clients (id, name, identity_center_url, email, notes, tags, environment, favorite, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 'never', ?8, ?9)",
-            params![id, request.name, request.identity_center_url, request.email, notes, tags, environment, now, now],
+            "INSERT INTO clients (id, name, identity_center_url, email, sso_region, sso_account_id, sso_role_name, notes, tags, environment, favorite, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, 'never', ?11, ?12)",
+            params![id, request.name, request.identity_center_url, request.email, sso_region, sso_account_id, sso_role_name, notes, tags, environment, now, now],
         ).map_err(|e| format!("Failed to create: {}", e))?;
         Ok(Client {
             id, name: request.name, identity_center_url: request.identity_center_url,
-            email: request.email, notes, tags, environment, favorite: false,
+            email: request.email, sso_region, sso_account_id, sso_role_name,
+            notes, tags, environment, favorite: false,
             last_login: None, status: "never".to_string(), created_at: now.clone(), updated_at: now,
         })
     })
@@ -283,6 +306,9 @@ fn update_client(state: State<AppState>, id: String, request: UpdateClientReques
         if let Some(ref v) = request.name { db.execute("UPDATE clients SET name=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
         if let Some(ref v) = request.identity_center_url { db.execute("UPDATE clients SET identity_center_url=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
         if let Some(ref v) = request.email { db.execute("UPDATE clients SET email=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.sso_region { db.execute("UPDATE clients SET sso_region=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.sso_account_id { db.execute("UPDATE clients SET sso_account_id=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.sso_role_name { db.execute("UPDATE clients SET sso_role_name=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
         if let Some(ref v) = request.notes { db.execute("UPDATE clients SET notes=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
         if let Some(ref v) = request.tags { db.execute("UPDATE clients SET tags=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
         if let Some(ref v) = request.environment { db.execute("UPDATE clients SET environment=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
@@ -541,9 +567,15 @@ fn generate_aws_config(state: State<AppState>) -> Result<String, String> {
         let profile_name = client.name.to_lowercase().replace(' ', "-").replace(['/', '\\', '.'], "");
         config.push_str(&format!("[profile {}]\n", profile_name));
         config.push_str(&format!("sso_start_url = {}\n", client.identity_center_url));
-        config.push_str("sso_region = us-east-1\n");
+        config.push_str(&format!("sso_region = {}\n", if client.sso_region.is_empty() { "us-east-1" } else { &client.sso_region }));
+        if !client.sso_account_id.is_empty() {
+            config.push_str(&format!("sso_account_id = {}\n", client.sso_account_id));
+        }
+        if !client.sso_role_name.is_empty() {
+            config.push_str(&format!("sso_role_name = {}\n", client.sso_role_name));
+        }
         config.push_str("sso_registration_scopes = sso:account:access\n");
-        config.push_str("region = us-east-1\n");
+        config.push_str(&format!("region = {}\n", if client.sso_region.is_empty() { "us-east-1" } else { &client.sso_region }));
         config.push_str("output = json\n");
         config.push_str("\n");
     }

@@ -3,6 +3,9 @@ export interface Client {
   name: string;
   identity_center_url: string;
   email: string;
+  sso_region: string;
+  sso_account_id: string;
+  sso_role_name: string;
   notes: string;
   tags: string;
   environment: string;
@@ -18,6 +21,9 @@ export interface CreateClientRequest {
   identity_center_url: string;
   email: string;
   password: string;
+  sso_region?: string;
+  sso_account_id?: string;
+  sso_role_name?: string;
   notes?: string;
   tags?: string;
   environment?: string;
@@ -28,6 +34,9 @@ export interface UpdateClientRequest {
   identity_center_url?: string;
   email?: string;
   password?: string;
+  sso_region?: string;
+  sso_account_id?: string;
+  sso_role_name?: string;
   notes?: string;
   tags?: string;
   environment?: string;
