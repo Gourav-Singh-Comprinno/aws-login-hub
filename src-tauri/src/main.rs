@@ -1,0 +1,768 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod vault;
+
+use serde::{Deserialize, Serialize};
+use rusqlite::{Connection, params};
+use std::sync::Mutex;
+use tauri::State;
+use chrono::Utc;
+use vault::{VaultManager, UnlockedVault, UserProfile};
+
+// ============================================================
+// Data Models
+// ============================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Client {
+    pub id: String,
+    pub name: String,
+    pub identity_center_url: String,
+    pub email: String,
+    pub notes: String,
+    pub tags: String,
+    pub environment: String,
+    pub favorite: bool,
+    pub last_login: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateClientRequest {
+    pub name: String,
+    pub identity_center_url: String,
+    pub email: String,
+    pub password: String,
+    pub notes: Option<String>,
+    pub tags: Option<String>,
+    pub environment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateClientRequest {
+    pub name: Option<String>,
+    pub identity_center_url: Option<String>,
+    pub email: Option<String>,
+    pub password: Option<String>,
+    pub notes: Option<String>,
+    pub tags: Option<String>,
+    pub environment: Option<String>,
+    pub favorite: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardStats {
+    pub total_clients: usize,
+    pub favorites: usize,
+    pub logged_in_today: usize,
+    pub recent_clients: Vec<Client>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserInfo {
+    pub username: String,
+    pub display_name: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LoginResponse {
+    success: bool,
+    message: String,
+    step: String,
+}
+
+// ============================================================
+// App State — Multi-User with Vault
+// ============================================================
+
+pub struct AppState {
+    pub vault_manager: VaultManager,
+    pub active_vault: Mutex<Option<UnlockedVault>>,
+    pub active_db: Mutex<Option<Connection>>,
+}
+
+// ============================================================
+// Database (per-user)
+// ============================================================
+
+fn init_user_db(path: &std::path::Path) -> Connection {
+    let conn = Connection::open(path).expect("Failed to open user database");
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS clients (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            identity_center_url TEXT NOT NULL,
+            email TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            tags TEXT DEFAULT '',
+            environment TEXT DEFAULT '',
+            favorite INTEGER DEFAULT 0,
+            last_login TEXT,
+            status TEXT DEFAULT 'never',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_clients_favorite ON clients(favorite);
+        CREATE INDEX IF NOT EXISTS idx_clients_last_login ON clients(last_login);
+    ").expect("Failed to init user database");
+    conn
+}
+
+fn row_to_client(row: &rusqlite::Row) -> rusqlite::Result<Client> {
+    Ok(Client {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        identity_center_url: row.get(2)?,
+        email: row.get(3)?,
+        notes: row.get::<_, String>(4).unwrap_or_default(),
+        tags: row.get::<_, String>(5).unwrap_or_default(),
+        environment: row.get::<_, String>(6).unwrap_or_default(),
+        favorite: row.get::<_, i32>(7).unwrap_or(0) != 0,
+        last_login: row.get::<_, Option<String>>(8).unwrap_or(None),
+        status: row.get::<_, String>(9).unwrap_or_else(|_| "never".to_string()),
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+const COLS: &str = "id, name, identity_center_url, email, notes, tags, environment, favorite, last_login, status, created_at, updated_at";
+
+// Helper: get active DB or error
+fn with_db<F, R>(state: &State<AppState>, f: F) -> Result<R, String>
+where F: FnOnce(&Connection) -> Result<R, String> {
+    let lock = state.active_db.lock().map_err(|e| e.to_string())?;
+    let db = lock.as_ref().ok_or("Vault is locked. Please unlock first.")?;
+    f(db)
+}
+
+// ============================================================
+// User & Vault Commands
+// ============================================================
+
+#[tauri::command]
+fn get_users(state: State<AppState>) -> Result<Vec<UserInfo>, String> {
+    let users = state.vault_manager.load_users();
+    Ok(users.into_iter().map(|u| UserInfo {
+        username: u.username,
+        display_name: u.display_name,
+        created_at: u.created_at,
+    }).collect())
+}
+
+#[tauri::command]
+fn create_user(state: State<AppState>, username: String, display_name: String, master_password: String) -> Result<UserInfo, String> {
+    if username.is_empty() || master_password.len() < 6 {
+        return Err("Username required, password must be at least 6 characters".to_string());
+    }
+    let profile = state.vault_manager.create_user(&username, &display_name, &master_password)?;
+    Ok(UserInfo { username: profile.username, display_name: profile.display_name, created_at: profile.created_at })
+}
+
+#[tauri::command]
+fn delete_user(state: State<AppState>, username: String, master_password: String) -> Result<(), String> {
+    // Verify password before deletion
+    let _ = state.vault_manager.unlock(&username, &master_password)?;
+    state.vault_manager.delete_user(&username)
+}
+
+#[tauri::command]
+fn unlock_vault(state: State<AppState>, username: String, master_password: String) -> Result<UserInfo, String> {
+    let unlocked = state.vault_manager.unlock(&username, &master_password)?;
+
+    // Open user's database
+    let db_path = state.vault_manager.db_path(&username);
+    let db = init_user_db(&db_path);
+
+    // Store in state
+    let mut vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+    *vault_lock = Some(unlocked);
+
+    let mut db_lock = state.active_db.lock().map_err(|e| e.to_string())?;
+    *db_lock = Some(db);
+
+    let users = state.vault_manager.load_users();
+    let user = users.iter().find(|u| u.username == username).unwrap();
+    Ok(UserInfo { username: user.username.clone(), display_name: user.display_name.clone(), created_at: user.created_at.clone() })
+}
+
+#[tauri::command]
+fn lock_vault(state: State<AppState>) -> Result<(), String> {
+    // Save vault before locking
+    let mut vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+    if let Some(ref vault) = *vault_lock {
+        state.vault_manager.save_vault(vault)?;
+    }
+    *vault_lock = None; // Drops the vault, zeroing the key
+
+    let mut db_lock = state.active_db.lock().map_err(|e| e.to_string())?;
+    *db_lock = None;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn is_vault_unlocked(state: State<AppState>) -> bool {
+    state.active_vault.lock().map(|v| v.is_some()).unwrap_or(false)
+}
+
+#[tauri::command]
+fn change_master_password(state: State<AppState>, username: String, current_password: String, new_password: String) -> Result<(), String> {
+    if new_password.len() < 6 {
+        return Err("New password must be at least 6 characters".to_string());
+    }
+    state.vault_manager.change_master_password(&username, &current_password, &new_password)
+}
+
+// ============================================================
+// Client Commands (require unlocked vault)
+// ============================================================
+
+#[tauri::command]
+fn get_clients(state: State<AppState>) -> Result<Vec<Client>, String> {
+    with_db(&state, |db| {
+        let sql = format!("SELECT {} FROM clients ORDER BY name", COLS);
+        let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
+        let iter = stmt.query_map([], row_to_client).map_err(|e| e.to_string())?;
+        iter.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn get_client(state: State<AppState>, id: String) -> Result<Client, String> {
+    with_db(&state, |db| {
+        let sql = format!("SELECT {} FROM clients WHERE id=?1", COLS);
+        db.query_row(&sql, params![id], row_to_client).map_err(|e| format!("Not found: {}", e))
+    })
+}
+
+#[tauri::command]
+fn create_client(state: State<AppState>, request: CreateClientRequest) -> Result<Client, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let notes = request.notes.unwrap_or_default();
+    let tags = request.tags.unwrap_or_default();
+    let environment = request.environment.unwrap_or_default();
+
+    // Store password in vault
+    {
+        let mut vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+        let vault = vault_lock.as_mut().ok_or("Vault is locked")?;
+        VaultManager::store_credential(vault, &id, &request.password);
+        state.vault_manager.save_vault(vault)?;
+    }
+
+    with_db(&state, |db| {
+        db.execute(
+            "INSERT INTO clients (id, name, identity_center_url, email, notes, tags, environment, favorite, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 'never', ?8, ?9)",
+            params![id, request.name, request.identity_center_url, request.email, notes, tags, environment, now, now],
+        ).map_err(|e| format!("Failed to create: {}", e))?;
+        Ok(Client {
+            id, name: request.name, identity_center_url: request.identity_center_url,
+            email: request.email, notes, tags, environment, favorite: false,
+            last_login: None, status: "never".to_string(), created_at: now.clone(), updated_at: now,
+        })
+    })
+}
+
+#[tauri::command]
+fn update_client(state: State<AppState>, id: String, request: UpdateClientRequest) -> Result<Client, String> {
+    let now = Utc::now().to_rfc3339();
+
+    // Update password in vault if provided
+    if let Some(ref pw) = request.password {
+        let mut vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+        let vault = vault_lock.as_mut().ok_or("Vault is locked")?;
+        VaultManager::store_credential(vault, &id, pw);
+        state.vault_manager.save_vault(vault)?;
+    }
+
+    with_db(&state, |db| {
+        if let Some(ref v) = request.name { db.execute("UPDATE clients SET name=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.identity_center_url { db.execute("UPDATE clients SET identity_center_url=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.email { db.execute("UPDATE clients SET email=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.notes { db.execute("UPDATE clients SET notes=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.tags { db.execute("UPDATE clients SET tags=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(ref v) = request.environment { db.execute("UPDATE clients SET environment=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
+        if let Some(v) = request.favorite { db.execute("UPDATE clients SET favorite=?1, updated_at=?2 WHERE id=?3", params![v as i32, now, id]).ok(); }
+        let sql = format!("SELECT {} FROM clients WHERE id=?1", COLS);
+        db.query_row(&sql, params![id], row_to_client).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn delete_client(state: State<AppState>, id: String) -> Result<(), String> {
+    // Remove from vault
+    {
+        let mut vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+        if let Some(ref mut vault) = *vault_lock {
+            VaultManager::delete_credential(vault, &id);
+            state.vault_manager.save_vault(vault)?;
+        }
+    }
+    with_db(&state, |db| {
+        db.execute("DELETE FROM clients WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn toggle_favorite(state: State<AppState>, id: String) -> Result<Client, String> {
+    let now = Utc::now().to_rfc3339();
+    with_db(&state, |db| {
+        db.execute("UPDATE clients SET favorite = CASE WHEN favorite=0 THEN 1 ELSE 0 END, updated_at=?1 WHERE id=?2", params![now, id]).map_err(|e| e.to_string())?;
+        let sql = format!("SELECT {} FROM clients WHERE id=?1", COLS);
+        db.query_row(&sql, params![id], row_to_client).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn search_clients(state: State<AppState>, query: String) -> Result<Vec<Client>, String> {
+    with_db(&state, |db| {
+        let pat = format!("%{}%", query);
+        let sql = format!("SELECT {} FROM clients WHERE name LIKE ?1 OR email LIKE ?1 OR tags LIKE ?1 OR environment LIKE ?1 ORDER BY name", COLS);
+        let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
+        let iter = stmt.query_map(params![pat], row_to_client).map_err(|e| e.to_string())?;
+        iter.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn get_dashboard_stats(state: State<AppState>) -> Result<DashboardStats, String> {
+    with_db(&state, |db| {
+        let total: usize = db.query_row("SELECT COUNT(*) FROM clients", [], |r| r.get(0)).unwrap_or(0);
+        let favorites: usize = db.query_row("SELECT COUNT(*) FROM clients WHERE favorite=1", [], |r| r.get(0)).unwrap_or(0);
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        let logged_today: usize = db.query_row("SELECT COUNT(*) FROM clients WHERE last_login LIKE ?1", params![format!("{}%", today)], |r| r.get(0)).unwrap_or(0);
+        let sql = format!("SELECT {} FROM clients WHERE last_login IS NOT NULL ORDER BY last_login DESC LIMIT 10", COLS);
+        let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
+        let recent_clients: Vec<Client> = stmt.query_map([], row_to_client).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(DashboardStats { total_clients: total, favorites, logged_in_today: logged_today, recent_clients })
+    })
+}
+
+#[tauri::command]
+fn update_last_login(state: State<AppState>, id: String) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339();
+    with_db(&state, |db| {
+        db.execute("UPDATE clients SET last_login=?1, status='active', updated_at=?1 WHERE id=?2", params![now, id]).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn get_client_password(state: State<AppState>, id: String) -> Result<String, String> {
+    let vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+    let vault = vault_lock.as_ref().ok_or("Vault is locked")?;
+    VaultManager::get_credential(vault, &id)
+}
+// ============================================================
+// Export / Import Vault
+// ============================================================
+
+#[derive(Debug, Serialize)]
+struct ExportResult {
+    path: String,
+    size: u64,
+}
+
+#[tauri::command]
+fn export_vault(state: State<AppState>, destination: String) -> Result<ExportResult, String> {
+    let vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+    let vault = vault_lock.as_ref().ok_or("Vault is locked. Unlock first.")?;
+    let username = &vault.username;
+
+    let vault_path = state.vault_manager.vault_path_public(username);
+    let db_path = state.vault_manager.db_path(username);
+
+    let vault_bytes = std::fs::read(&vault_path)
+        .map_err(|e| format!("Failed to read vault: {}", e))?;
+    let db_bytes = std::fs::read(&db_path)
+        .map_err(|e| format!("Failed to read database: {}", e))?;
+
+    let mut bundle: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    bundle.insert("version".to_string(), "1".to_string());
+    bundle.insert("username".to_string(), username.clone());
+    bundle.insert("exported_at".to_string(), Utc::now().to_rfc3339());
+    bundle.insert("vault".to_string(), hex::encode(&vault_bytes));
+    bundle.insert("database".to_string(), hex::encode(&db_bytes));
+
+    let json = serde_json::to_vec_pretty(&bundle)
+        .map_err(|e| format!("Failed to serialize: {}", e))?;
+
+    let dest_path = if destination.ends_with(".vault-backup") {
+        destination.clone()
+    } else {
+        let filename = format!("{}-{}.vault-backup", username, Utc::now().format("%Y%m%d"));
+        let mut p = std::path::PathBuf::from(&destination);
+        p.push(filename);
+        p.to_string_lossy().to_string()
+    };
+
+    std::fs::write(&dest_path, &json)
+        .map_err(|e| format!("Failed to write backup: {}", e))?;
+
+    Ok(ExportResult { path: dest_path, size: json.len() as u64 })
+}
+
+#[tauri::command]
+fn import_vault(state: State<AppState>, file_path: String, master_password: String) -> Result<UserInfo, String> {
+    let content = std::fs::read_to_string(&file_path)
+        .map_err(|e| format!("Failed to read backup: {}", e))?;
+
+    let bundle: std::collections::HashMap<String, String> = serde_json::from_str(&content)
+        .map_err(|e| format!("Invalid backup format: {}", e))?;
+
+    let username = bundle.get("username").ok_or("Missing username in backup")?;
+    let vault_hex = bundle.get("vault").ok_or("Missing vault data")?;
+    let db_hex = bundle.get("database").ok_or("Missing database")?;
+
+    let vault_bytes = hex::decode(vault_hex).map_err(|e| format!("Corrupt vault data: {}", e))?;
+    let db_bytes = hex::decode(db_hex).map_err(|e| format!("Corrupt database: {}", e))?;
+
+    // Write files
+    let vault_path = state.vault_manager.vault_path_public(username);
+    let db_path = state.vault_manager.db_path(username);
+
+    std::fs::write(&vault_path, &vault_bytes).map_err(|e| format!("Write failed: {}", e))?;
+    std::fs::write(&db_path, &db_bytes).map_err(|e| format!("Write failed: {}", e))?;
+
+    // Verify master password works
+    if state.vault_manager.unlock(username, &master_password).is_err() {
+        std::fs::remove_file(&vault_path).ok();
+        std::fs::remove_file(&db_path).ok();
+        return Err("Wrong master password for this backup. Import cancelled.".to_string());
+    }
+
+    // Register user if not already in manifest
+    state.vault_manager.register_imported_user(username, &master_password)?;
+
+    let users = state.vault_manager.load_users();
+    let user = users.iter().find(|u| u.username == *username).ok_or("Import failed")?;
+    Ok(UserInfo { username: user.username.clone(), display_name: user.display_name.clone(), created_at: user.created_at.clone() })
+}
+
+
+// ============================================================
+// Login Automation
+// ============================================================
+
+#[tauri::command]
+fn run_login(state: State<AppState>, url: String, email: String, password: String, client_id: String) -> Result<LoginResponse, String> {
+    use std::process::Command;
+    use std::io::Write;
+
+    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "/usr/lib/node_modules".to_string());
+
+    let script = format!(r#"
+const {{ chromium }} = require('{npm_root}/playwright');
+(async () => {{
+  let browser;
+  try {{
+    browser = await chromium.launch({{ headless: false, args: ['--start-maximized'] }});
+    const context = await browser.newContext({{ viewport: null }});
+    const page = await context.newPage();
+    console.log('[STEP] NAVIGATING');
+    await page.goto({url}, {{ waitUntil: 'networkidle', timeout: 30000 }});
+    await page.waitForTimeout(2000);
+    console.log('[STEP] FILLING_EMAIL');
+    const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
+    let emailFilled = false;
+    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill({email}); emailFilled = true; break; }} }} catch {{}} }}
+    if (!emailFilled) {{ console.log('[STEP] FAILED:Could not find email field'); process.exit(1); }}
+    console.log('[STEP] SUBMITTING_EMAIL');
+    const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
+    for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+    await page.waitForTimeout(3000);
+    console.log('[STEP] FILLING_PASSWORD');
+    const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
+    let pwFilled = false;
+    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill({password}); pwFilled = true; break; }} }} catch {{}} }}
+    if (!pwFilled) {{ console.log('[STEP] FAILED:Could not find password field'); process.exit(1); }}
+    console.log('[STEP] SUBMITTING_PASSWORD');
+    for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+    await page.waitForTimeout(3000);
+    console.log('[STEP] WAITING_MFA');
+    try {{ await page.waitForURL('**/console/**', {{ timeout: 300000 }}); console.log('[STEP] COMPLETED'); }} catch {{
+      const content = await page.content();
+      if (content.includes('incorrect') || content.includes('Invalid')) {{ console.log('[STEP] FAILED:Invalid credentials'); process.exit(1); }}
+      console.log('[STEP] FAILED:Login timed out'); process.exit(1);
+    }}
+  }} catch (error) {{ console.log('[STEP] FAILED:' + error.message); if (browser) await browser.close(); process.exit(1); }}
+}})();
+"#, npm_root=npm_root, url=serde_json::to_string(&url).unwrap_or_default(), email=serde_json::to_string(&email).unwrap_or_default(), password=serde_json::to_string(&password).unwrap_or_default());
+
+    let tmp_dir = std::env::temp_dir();
+    let script_path = tmp_dir.join(format!("awslh-{}.js", client_id));
+    let mut file = std::fs::File::create(&script_path).map_err(|e| e.to_string())?;
+    file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
+    drop(file);
+
+    let output = Command::new("node").arg(&script_path).output().map_err(|e| format!("Node.js error: {}", e))?;
+    let _ = std::fs::remove_file(&script_path); // Cleanup immediately
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    if stdout.contains("[STEP] COMPLETED") {
+        Ok(LoginResponse { success: true, message: "Login completed".to_string(), step: "completed".to_string() })
+    } else {
+        let msg = stdout.lines().filter(|l| l.contains("FAILED")).last()
+            .map(|l| l.replace("[STEP] FAILED:", "").trim().to_string())
+            .unwrap_or_else(|| "Login failed".to_string());
+        Ok(LoginResponse { success: false, message: msg, step: "failed".to_string() })
+    }
+}
+
+// ============================================================
+// Main
+// ============================================================
+
+fn main() {
+    let vault_manager = VaultManager::new();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState {
+            vault_manager,
+            active_vault: Mutex::new(None),
+            active_db: Mutex::new(None),
+        })
+        .invoke_handler(tauri::generate_handler![
+            // User & vault
+            get_users, create_user, delete_user,
+            unlock_vault, lock_vault, is_vault_unlocked,
+            change_master_password, export_vault, import_vault,
+            // Clients (require unlocked vault)
+            get_clients, get_client, create_client, update_client,
+            delete_client, toggle_favorite, search_clients,
+            get_dashboard_stats, update_last_login, get_client_password,
+            // Login
+            run_login,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+// ============================================================
+// INTEGRATION TESTS
+// ============================================================
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::fs;
+
+    fn setup_test_env() -> (vault::VaultManager, Connection, String) {
+        let dir = std::env::temp_dir().join(format!("awslh-integ-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut vm = vault::VaultManager::new();
+        vm.base_dir = dir.clone();
+        vm.create_user("integ_user", "Integration User", "test_pass").unwrap();
+
+        let db_path = dir.join("integ_user.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("
+            CREATE TABLE IF NOT EXISTS clients (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, identity_center_url TEXT NOT NULL,
+                email TEXT NOT NULL, notes TEXT DEFAULT '', tags TEXT DEFAULT '',
+                environment TEXT DEFAULT '', favorite INTEGER DEFAULT 0,
+                last_login TEXT, status TEXT DEFAULT 'never',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+        ").unwrap();
+
+        (vm, conn, dir.to_string_lossy().to_string())
+    }
+
+    fn cleanup(dir: &str) {
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_full_client_lifecycle() {
+        let (vm, conn, dir) = setup_test_env();
+        let mut vault = vm.unlock("integ_user", "test_pass").unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // CREATE
+        let id = uuid::Uuid::new_v4().to_string();
+        vault::VaultManager::store_credential(&mut vault, &id, "aws_password_123");
+        vm.save_vault(&vault).unwrap();
+
+        conn.execute(
+            "INSERT INTO clients (id, name, identity_center_url, email, notes, tags, environment, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, '', 'aws,prod', 'Production', 'never', ?5, ?5)",
+            params![id, "Netflix Prod", "https://d-abc123.awsapps.com/start", "user@netflix.com", now],
+        ).unwrap();
+
+        // READ
+        let client: String = conn.query_row(
+            "SELECT name FROM clients WHERE id = ?1", params![id], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(client, "Netflix Prod");
+
+        // READ CREDENTIAL
+        let pw = vault::VaultManager::get_credential(&vault, &id).unwrap();
+        assert_eq!(pw, "aws_password_123");
+
+        // UPDATE
+        conn.execute("UPDATE clients SET name = 'Netflix Production', favorite = 1 WHERE id = ?1", params![id]).unwrap();
+        let updated: String = conn.query_row("SELECT name FROM clients WHERE id = ?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(updated, "Netflix Production");
+        let fav: i32 = conn.query_row("SELECT favorite FROM clients WHERE id = ?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(fav, 1);
+
+        // UPDATE CREDENTIAL
+        vault::VaultManager::store_credential(&mut vault, &id, "new_password_456");
+        vm.save_vault(&vault).unwrap();
+        drop(vault);
+        let vault2 = vm.unlock("integ_user", "test_pass").unwrap();
+        assert_eq!(vault::VaultManager::get_credential(&vault2, &id).unwrap(), "new_password_456");
+
+        // DELETE
+        conn.execute("DELETE FROM clients WHERE id = ?1", params![id]).unwrap();
+        let count: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE id = ?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_search_functionality() {
+        let (_vm, conn, dir) = setup_test_env();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Insert multiple clients
+        for (name, email, env) in [
+            ("Netflix Prod", "admin@netflix.com", "Production"),
+            ("Netflix Dev", "dev@netflix.com", "Development"),
+            ("Adobe Staging", "user@adobe.com", "Staging"),
+            ("AWS Internal", "ops@amazon.com", "Production"),
+        ] {
+            let id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO clients (id, name, identity_center_url, email, tags, environment, status, created_at, updated_at) VALUES (?1, ?2, 'https://test.com', ?3, '', ?4, 'never', ?5, ?5)",
+                params![id, name, email, env, now],
+            ).unwrap();
+        }
+
+        // Search by name
+        let pattern = "%Netflix%";
+        let mut stmt = conn.prepare("SELECT COUNT(*) FROM clients WHERE name LIKE ?1 OR email LIKE ?1").unwrap();
+        let count: i32 = stmt.query_row(params![pattern], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+
+        // Search by email
+        let pattern2 = "%adobe%";
+        let count2: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE name LIKE ?1 OR email LIKE ?1", params![pattern2], |r| r.get(0)).unwrap();
+        assert_eq!(count2, 1);
+
+        // Search by environment
+        let pattern3 = "%Production%";
+        let count3: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE environment LIKE ?1", params![pattern3], |r| r.get(0)).unwrap();
+        assert_eq!(count3, 2);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_favorites_and_recent() {
+        let (_vm, conn, dir) = setup_test_env();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Create clients with different states
+        let id1 = uuid::Uuid::new_v4().to_string();
+        let id2 = uuid::Uuid::new_v4().to_string();
+        let id3 = uuid::Uuid::new_v4().to_string();
+
+        conn.execute("INSERT INTO clients (id, name, identity_center_url, email, favorite, last_login, status, created_at, updated_at) VALUES (?1, 'Fav Client', 'https://a.com', 'a@a.com', 1, ?2, 'active', ?2, ?2)", params![id1, now]).unwrap();
+        conn.execute("INSERT INTO clients (id, name, identity_center_url, email, favorite, last_login, status, created_at, updated_at) VALUES (?1, 'Recent Client', 'https://b.com', 'b@b.com', 0, ?2, 'active', ?2, ?2)", params![id2, now]).unwrap();
+        conn.execute("INSERT INTO clients (id, name, identity_center_url, email, favorite, status, created_at, updated_at) VALUES (?1, 'New Client', 'https://c.com', 'c@c.com', 0, 'never', ?2, ?2)", params![id3, now]).unwrap();
+
+        // Favorites
+        let fav_count: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE favorite = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(fav_count, 1);
+
+        // Recent (have last_login)
+        let recent_count: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE last_login IS NOT NULL", [], |r| r.get(0)).unwrap();
+        assert_eq!(recent_count, 2);
+
+        // Toggle favorite
+        conn.execute("UPDATE clients SET favorite = CASE WHEN favorite=0 THEN 1 ELSE 0 END WHERE id = ?1", params![id2]).unwrap();
+        let fav_count2: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE favorite = 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(fav_count2, 2);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_dashboard_stats() {
+        let (_vm, conn, dir) = setup_test_env();
+        let now = chrono::Utc::now().to_rfc3339();
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+        // Setup data
+        conn.execute("INSERT INTO clients (id, name, identity_center_url, email, favorite, last_login, status, created_at, updated_at) VALUES ('1', 'A', 'https://a.com', 'a@a.com', 1, ?1, 'active', ?1, ?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO clients (id, name, identity_center_url, email, favorite, status, created_at, updated_at) VALUES ('2', 'B', 'https://b.com', 'b@b.com', 0, 'never', ?1, ?1)", params![now]).unwrap();
+        conn.execute("INSERT INTO clients (id, name, identity_center_url, email, favorite, last_login, status, created_at, updated_at) VALUES ('3', 'C', 'https://c.com', 'c@c.com', 1, ?1, 'active', ?1, ?1)", params![now]).unwrap();
+
+        let total: i32 = conn.query_row("SELECT COUNT(*) FROM clients", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 3);
+
+        let favorites: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE favorite=1", [], |r| r.get(0)).unwrap();
+        assert_eq!(favorites, 2);
+
+        let logged_today: i32 = conn.query_row("SELECT COUNT(*) FROM clients WHERE last_login LIKE ?1", params![format!("{}%", today)], |r| r.get(0)).unwrap();
+        assert_eq!(logged_today, 2);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn test_vault_export_import_flow() {
+        let (vm, _conn, dir) = setup_test_env();
+
+        // Store credentials
+        let mut vault = vm.unlock("integ_user", "test_pass").unwrap();
+        vault::VaultManager::store_credential(&mut vault, "client-x", "password-x");
+        vault::VaultManager::store_credential(&mut vault, "client-y", "password-y");
+        vm.save_vault(&vault).unwrap();
+        drop(vault);
+
+        // Export: read vault file + users manifest (preserving the user entry)
+        let vault_path = vm.vault_path_public("integ_user");
+        let export_vault_data = fs::read(&vault_path).unwrap();
+        let users_data = fs::read_to_string(std::path::PathBuf::from(&dir).join("users.json")).unwrap();
+        assert!(!export_vault_data.is_empty());
+
+        // Simulate import on fresh environment
+        let import_dir = std::env::temp_dir().join(format!("awslh-import-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&import_dir).unwrap();
+        let mut vm2 = vault::VaultManager::new();
+        vm2.base_dir = import_dir.clone();
+
+        // Copy vault file
+        fs::write(import_dir.join("integ_user.vault.enc"), &export_vault_data).unwrap();
+        // Copy users manifest (preserves salt and password hash)
+        fs::write(import_dir.join("users.json"), &users_data).unwrap();
+        // Copy DB
+        let src_db = std::path::PathBuf::from(&dir).join("integ_user.db");
+        fs::copy(&src_db, import_dir.join("integ_user.db")).unwrap();
+
+        // Verify we can unlock and read credentials with the same password
+        let vault2 = vm2.unlock("integ_user", "test_pass").unwrap();
+        assert_eq!(vault::VaultManager::get_credential(&vault2, "client-x").unwrap(), "password-x");
+        assert_eq!(vault::VaultManager::get_credential(&vault2, "client-y").unwrap(), "password-y");
+
+        // Wrong password should fail
+        assert!(vm2.unlock("integ_user", "wrong_pass").is_err());
+
+        fs::remove_dir_all(&import_dir).ok();
+        cleanup(&dir);
+    }
+}
