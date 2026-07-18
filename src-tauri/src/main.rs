@@ -565,7 +565,8 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
     // Normalize backslashes to forward slashes for JS require() compatibility
     let npm_root_js = npm_root.replace('\\', "/");
 
-    // Script reads credentials from environment variables (never written to disk)
+    // Script uses machine's installed Chrome (not Playwright's Chromium)
+    // Runs non-blocking — app stays usable while browser is open
     let script = format!(r#"
 const {{ chromium }} = require('{npm_root}/playwright');
 (async () => {{
@@ -574,36 +575,59 @@ const {{ chromium }} = require('{npm_root}/playwright');
   const password = process.env.AWSLH_PASSWORD;
   let browser;
   try {{
-    browser = await chromium.launch({{ headless: false, args: ['--start-maximized'] }});
+    // Use machine's installed Chrome/Edge instead of Playwright's bundled Chromium
+    browser = await chromium.launch({{
+      headless: false,
+      channel: 'chrome',
+      args: ['--start-maximized']
+    }});
     const context = await browser.newContext({{ viewport: null }});
     const page = await context.newPage();
-    console.log('[STEP] NAVIGATING');
     await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
     await page.waitForTimeout(2000);
-    console.log('[STEP] FILLING_EMAIL');
+    // Fill email
     const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
-    let emailFilled = false;
-    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill(email); emailFilled = true; break; }} }} catch {{}} }}
-    if (!emailFilled) {{ console.log('[STEP] FAILED:Could not find email field'); process.exit(1); }}
-    console.log('[STEP] SUBMITTING_EMAIL');
+    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill(email); break; }} }} catch {{}} }}
+    // Click next
     const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
     for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
     await page.waitForTimeout(3000);
-    console.log('[STEP] FILLING_PASSWORD');
+    // Fill password
     const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
-    let pwFilled = false;
-    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill(password); pwFilled = true; break; }} }} catch {{}} }}
-    if (!pwFilled) {{ console.log('[STEP] FAILED:Could not find password field'); process.exit(1); }}
-    console.log('[STEP] SUBMITTING_PASSWORD');
+    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill(password); break; }} }} catch {{}} }}
+    // Click submit
     for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
-    await page.waitForTimeout(3000);
-    console.log('[STEP] WAITING_MFA');
-    try {{ await page.waitForURL('**/console/**', {{ timeout: 300000 }}); console.log('[STEP] COMPLETED'); }} catch {{
-      const content = await page.content();
-      if (content.includes('incorrect') || content.includes('Invalid')) {{ console.log('[STEP] FAILED:Invalid credentials'); process.exit(1); }}
-      console.log('[STEP] FAILED:Login timed out'); process.exit(1);
+    // Keep browser open — wait until user closes it
+    // This keeps the node process alive so Chrome doesn't exit
+    await new Promise((resolve) => {{
+      browser.on('disconnected', resolve);
+    }});
+  }} catch (error) {{
+    // If Chrome not found, try msedge
+    if (error.message && (error.message.includes('channel') || error.message.includes('Chrome'))) {{
+      try {{
+        browser = await chromium.launch({{ headless: false, channel: 'msedge', args: ['--start-maximized'] }});
+        const context = await browser.newContext({{ viewport: null }});
+        const page = await context.newPage();
+        await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
+        await page.waitForTimeout(2000);
+        const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
+        for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill(email); break; }} }} catch {{}} }}
+        const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
+        for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+        await page.waitForTimeout(3000);
+        const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
+        for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill(password); break; }} }} catch {{}} }}
+        for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+        await new Promise((resolve) => {{ browser.on('disconnected', resolve); }});
+      }} catch (e2) {{
+        process.exit(1);
+      }}
+    }} else {{
+      if (browser) try {{ await browser.close(); }} catch {{}}
+      process.exit(1);
     }}
-  }} catch (error) {{ console.log('[STEP] FAILED:' + error.message); if (browser) await browser.close(); process.exit(1); }}
+  }}
 }})();
 "#, npm_root=npm_root_js);
 
@@ -613,7 +637,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
     file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
     drop(file);
 
-    // Pass credentials via environment variables (never on disk)
+    // Spawn in background — don't block the app
     let child = Command::new("node")
         .arg(&script_path)
         .env("AWSLH_URL", &url)
@@ -622,20 +646,20 @@ const {{ chromium }} = require('{npm_root}/playwright');
         .spawn();
 
     match child {
-        Ok(proc) => {
-            // Wait for process to complete
-            let output = proc.wait_with_output().map_err(|e| format!("Node.js error: {}", e))?;
-            let _ = std::fs::remove_file(&script_path); // Cleanup
+        Ok(_) => {
+            // Return immediately — browser opens in background, app stays usable
+            // Cleanup script after a delay (node will have read it by then)
+            let path_clone = script_path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+                let _ = std::fs::remove_file(&path_clone);
+            });
 
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            if stdout.contains("[STEP] COMPLETED") {
-                Ok(LoginResponse { success: true, message: "Login completed".to_string(), step: "completed".to_string() })
-            } else {
-                let msg = stdout.lines().filter(|l| l.contains("FAILED")).last()
-                    .map(|l| l.replace("[STEP] FAILED:", "").trim().to_string())
-                    .unwrap_or_else(|| "Login failed".to_string());
-                Ok(LoginResponse { success: false, message: msg, step: "failed".to_string() })
-            }
+            Ok(LoginResponse {
+                success: true,
+                message: "Browser opened. Complete MFA if prompted.".to_string(),
+                step: "completed".to_string(),
+            })
         }
         Err(e) => {
             let _ = std::fs::remove_file(&script_path);

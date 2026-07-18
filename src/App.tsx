@@ -1,21 +1,17 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { LayoutDashboard, Users, Star, Clock, Settings, Shield, Lock, Zap, Terminal as TermIcon, Download } from "lucide-react";
+import { Users, Settings, Shield, Lock, Zap, Download } from "lucide-react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { Page } from "./types";
 import { api, type UserInfo } from "./services/api";
-import Dashboard from "./pages/Dashboard";
 import Clients from "./pages/Clients";
-import Favorites from "./pages/Favorites";
-import Recent from "./pages/Recent";
-import Terminal from "./pages/Terminal";
 import SettingsPage from "./pages/Settings";
 
 function App() {
   const [unlocked, setUnlocked] = useState(false);
   const [currentUser, setCurrentUser] = useState<UserInfo | null>(null);
-  const [currentPage, setCurrentPage] = useState<Page>("dashboard");
+  const [currentPage, setCurrentPage] = useState<Page>("clients");
   const lastActivityRef = useRef(Date.now());
   const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body: string } | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -56,7 +52,7 @@ function App() {
         api.lockVault().then(() => {
           setUnlocked(false);
           setCurrentUser(null);
-          setCurrentPage("dashboard");
+          setCurrentPage("clients");
         });
       }
     }, 30000);
@@ -77,16 +73,12 @@ function App() {
     // Refresh password expiry marker
     api.refreshPasswordExpiry().catch(() => {});
   };
-  const handleLock = async () => { await api.lockVault(); setUnlocked(false); setCurrentUser(null); setCurrentPage("dashboard"); };
+  const handleLock = async () => { await api.lockVault(); setUnlocked(false); setCurrentUser(null); setCurrentPage("clients"); };
 
   if (!unlocked) return <UnlockScreen onUnlock={handleUnlock} />;
 
   const navItems: { id: Page; label: string; icon: React.ReactNode }[] = [
-    { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={18} /> },
     { id: "clients", label: "Clients", icon: <Users size={18} /> },
-    { id: "favorites", label: "Favorites", icon: <Star size={18} /> },
-    { id: "recent", label: "Recent", icon: <Clock size={18} /> },
-    { id: "terminal", label: "Terminal", icon: <TermIcon size={18} /> },
     { id: "settings", label: "Settings", icon: <Settings size={18} /> },
   ];
 
@@ -178,11 +170,7 @@ function App() {
             transition={{ duration: 0.2, ease: "easeOut" }}
             className="h-full overflow-auto"
           >
-            {currentPage === "dashboard" && <Dashboard onNavigate={setCurrentPage} />}
             {currentPage === "clients" && <Clients />}
-            {currentPage === "favorites" && <Favorites />}
-            {currentPage === "recent" && <Recent />}
-            {currentPage === "terminal" && <Terminal />}
             {currentPage === "settings" && <SettingsPage currentUser={currentUser} onLock={handleLock} />}
           </motion.div>
         </AnimatePresence>

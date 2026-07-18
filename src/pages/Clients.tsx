@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, Search, Star, Play, Edit2, Trash2, X, Loader2, Globe, Mail, RefreshCw } from "lucide-react";
+import { Plus, Search, Play, Edit2, Trash2, X, Loader2, Globe, Mail } from "lucide-react";
 import { api } from "../services/api";
-import { performLogin, type LoginProgress } from "../services/login";
 import type { Client, CreateClientRequest } from "../types";
 
 export default function Clients() {
@@ -10,9 +9,8 @@ export default function Clients() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingClient, setEditingClient] = useState<Client | null>(null);
-  const [loginProgress, setLoginProgress] = useState<{ id: string; progress: LoginProgress } | null>(null);
+  const [loginProgress, setLoginProgress] = useState<{ id: string; message: string } | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshingAll, setRefreshingAll] = useState(false);
 
   useEffect(() => { loadClients(); }, []);
   useEffect(() => { const t = setTimeout(loadClients, 300); return () => clearTimeout(t); }, [searchQuery]);
@@ -23,39 +21,24 @@ export default function Clients() {
     finally { setLoading(false); }
   }
 
-  async function handleToggleFavorite(id: string) { await api.toggleFavorite(id); loadClients(); }
   async function handleDelete(id: string, name: string) {
     if (!confirm(`Delete "${name}"?\nThis removes all stored credentials permanently.`)) return;
     await api.deleteClient(id); loadClients();
   }
-  async function handleLogin(client: Client) {
-    setLoginProgress({ id: client.id, progress: { step: "launching", message: "Starting..." } });
-    await performLogin(client, (p) => {
-      setLoginProgress({ id: client.id, progress: p });
-      if (p.step === "completed" || p.step === "failed") { setTimeout(() => setLoginProgress(null), 4000); loadClients(); }
-    });
-  }
 
-  async function handleRefreshAllTokens() {
-    setRefreshingAll(true);
+  async function handleLogin(client: Client) {
+    setLoginProgress({ id: client.id, message: "Opening browser..." });
     try {
-      // First sync profiles to ~/.aws/config
-      await api.generateAwsConfig();
-      // Then login to each client via browser automation to refresh SSO tokens
-      for (const client of clients) {
-        setLoginProgress({ id: client.id, progress: { step: "launching", message: "Refreshing token..." } });
-        await performLogin(client, (p) => {
-          setLoginProgress({ id: client.id, progress: p });
-        });
-        // Small delay between clients
-        await new Promise(r => setTimeout(r, 1000));
-      }
-      setLoginProgress(null);
+      const password = await api.getClientPassword(client.id);
+      await api.runLogin(client.identity_center_url, client.email, password, client.id);
+      setLoginProgress({ id: client.id, message: "Browser opened ✓" });
+      await api.updateLastLogin(client.id);
+      setTimeout(() => setLoginProgress(null), 3000);
+      loadClients();
     } catch (err) {
-      console.error(err);
+      setLoginProgress({ id: client.id, message: String(err) });
+      setTimeout(() => setLoginProgress(null), 5000);
     }
-    setRefreshingAll(false);
-    loadClients();
   }
 
   return (
@@ -67,10 +50,6 @@ export default function Clients() {
           <p className="text-zinc-500 text-sm mt-1">{clients.length} configured</p>
         </div>
         <div className="flex items-center gap-3">
-          <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={handleRefreshAllTokens} disabled={refreshingAll} className="btn-glass flex items-center gap-2 text-[13px]">
-            {refreshingAll ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-            {refreshingAll ? "Refreshing..." : "Refresh All Tokens"}
-          </motion.button>
           <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }} onClick={() => setShowAddForm(true)} className="btn-accent flex items-center gap-2 text-[13px]">
             <Plus size={16} /> Add Client
           </motion.button>
@@ -119,18 +98,15 @@ export default function Clients() {
               {/* Login Progress */}
               {loginProgress?.id === client.id && (
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-blue-500/10 border border-blue-500/20">
-                  {loginProgress.progress.step !== "failed" && loginProgress.progress.step !== "completed" && <Loader2 size={13} className="animate-spin text-blue-400" />}
-                  <span className={`text-[11px] font-medium ${loginProgress.progress.step === "failed" ? "text-red-400" : loginProgress.progress.step === "completed" ? "text-green-400" : "text-blue-400"}`}>
-                    {loginProgress.progress.message}
+                  {!loginProgress.message.includes("✓") && !loginProgress.message.includes("Failed") && <Loader2 size={13} className="animate-spin text-blue-400" />}
+                  <span className={`text-[11px] font-medium ${loginProgress.message.includes("Failed") || loginProgress.message.includes("Error") ? "text-red-400" : loginProgress.message.includes("✓") ? "text-green-400" : "text-blue-400"}`}>
+                    {loginProgress.message}
                   </span>
                 </div>
               )}
 
               {/* Actions */}
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={() => handleToggleFavorite(client.id)} className={`p-2.5 rounded-lg transition-all ${client.favorite ? "text-amber-400 bg-amber-400/10" : "text-zinc-600 hover:text-amber-400 hover:bg-amber-400/5"}`}>
-                  <Star size={15} fill={client.favorite ? "currentColor" : "none"} />
-                </button>
                 <button onClick={() => handleLogin(client)} disabled={!!loginProgress} className="p-2.5 text-green-400 hover:bg-green-400/10 rounded-lg transition-all disabled:opacity-30">
                   <Play size={15} />
                 </button>

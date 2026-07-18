@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Client, CreateClientRequest, UpdateClientRequest, DashboardStats } from "../types";
+import type { Client, CreateClientRequest } from "../types";
 
 export interface UserInfo {
   username: string;
@@ -31,17 +31,21 @@ export const api = {
     return invoke("import_vault", { filePath, masterPassword });
   },
 
-  // Clients (require unlocked vault)
+  // Clients
   async getClients(): Promise<Client[]> { return invoke("get_clients"); },
   async getClient(id: string): Promise<Client> { return invoke("get_client", { id }); },
   async createClient(request: CreateClientRequest): Promise<Client> { return invoke("create_client", { request }); },
-  async updateClient(id: string, request: UpdateClientRequest): Promise<Client> { return invoke("update_client", { id, request }); },
+  async updateClient(id: string, request: Record<string, string | undefined>): Promise<Client> { return invoke("update_client", { id, request }); },
   async deleteClient(id: string): Promise<void> { return invoke("delete_client", { id }); },
   async toggleFavorite(id: string): Promise<Client> { return invoke("toggle_favorite", { id }); },
   async searchClients(query: string): Promise<Client[]> { return invoke("search_clients", { query }); },
-  async getDashboardStats(): Promise<DashboardStats> { return invoke("get_dashboard_stats"); },
   async updateLastLogin(id: string): Promise<void> { return invoke("update_last_login", { id }); },
   async getClientPassword(id: string): Promise<string> { return invoke("get_client_password", { id }); },
+
+  // Login (opens Chrome with auto-fill, non-blocking)
+  async runLogin(url: string, email: string, password: string, clientId: string): Promise<{ success: boolean; message: string }> {
+    return invoke("run_login", { url, email, password, clientId });
+  },
 
   // AWS CLI & SSO
   async generateAwsConfig(): Promise<string> { return invoke("generate_aws_config"); },
@@ -49,26 +53,8 @@ export const api = {
   async refreshSsoToken(profile: string): Promise<{ profile: string; success: boolean; message: string }> {
     return invoke("refresh_sso_token", { profile });
   },
-  async refreshAllSsoTokens(): Promise<{ profile: string; success: boolean; message: string }[]> {
-    return invoke("refresh_all_sso_tokens");
-  },
-  async getSsoCredentials(profile: string): Promise<string> {
-    return invoke("get_sso_credentials", { profile });
-  },
-  async exportCredentialsEnv(profile: string): Promise<string> {
-    return invoke("export_credentials_env", { profile });
-  },
-
-  // Session Management
-  async getSessionStatus(id: string): Promise<string> { return invoke("get_session_status", { id }); },
 
   // Password Expiration
   async checkPasswordExpiry(): Promise<boolean> { return invoke("check_password_expiry"); },
   async refreshPasswordExpiry(): Promise<void> { return invoke("refresh_password_expiry"); },
-
-  // Terminal
-  async runTerminalCommand(command: string, profile: string): Promise<string> { return invoke("run_terminal_command", { command, profile }); },
-
-  // Biometric
-  async checkBiometricAvailable(): Promise<boolean> { return invoke("check_biometric_available"); },
 };
