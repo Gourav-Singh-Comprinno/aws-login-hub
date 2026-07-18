@@ -1,77 +1,136 @@
-<div align="center">
+<p align="center">
+  <img src="https://img.shields.io/badge/Tauri-2.0-blue?style=for-the-badge&logo=tauri" />
+  <img src="https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react" />
+  <img src="https://img.shields.io/badge/Rust-2021-orange?style=for-the-badge&logo=rust" />
+  <img src="https://img.shields.io/badge/Encryption-AES--256--GCM-green?style=for-the-badge&logo=letsencrypt" />
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey?style=for-the-badge" />
+</p>
 
-# AWS Login Hub
+# 🔐 AWS Login Hub
 
-**Secure desktop application for managing multiple AWS Identity Center logins.**
-
-Built with Tauri, React, Rust, and AES-256-GCM encryption.
-
-[Download](#installation) · [Documentation](#how-it-works) · [Build from Source](#build-from-source)
-
----
-
-</div>
-
-## Overview
-
-AWS Login Hub is a cross-platform desktop application that helps DevOps engineers manage multiple AWS Identity Center (SSO) client logins. It securely stores credentials in a locally encrypted vault and automates repetitive browser-based login steps using Playwright.
-
-The app never bypasses MFA — it automates email and password entry, then pauses for manual MFA completion.
+A premium desktop application for managing multiple AWS Identity Center (AWS SSO) client logins with **military-grade encryption**, **browser automation**, and **cross-platform support**.
 
 ---
 
-## Screenshots
+## 📸 Screenshots
 
+### 🔒 Vault Unlock Screen
 <p align="center">
   <img src="screenshots/01-unlock-screen.png" width="800" alt="Vault Unlock Screen" />
-  <br><em>Vault Unlock Screen</em>
 </p>
 
+### 👤 Create Profile
+<p align="center">
+  <img src="screenshots/02-create-profile.png" width="800" alt="Create Profile" />
+</p>
+
+### 📊 Dashboard
 <p align="center">
   <img src="screenshots/03-dashboard.png" width="800" alt="Dashboard" />
-  <br><em>Dashboard</em>
 </p>
 
+### 👥 Clients Management
 <p align="center">
-  <img src="screenshots/04-clients.png" width="800" alt="Client Management" />
-  <br><em>Client Management</em>
+  <img src="screenshots/04-clients.png" width="800" alt="Clients" />
 </p>
 
+### ⭐ Favorites
 <p align="center">
-  <img src="screenshots/06-settings.png" width="800" alt="Settings and Security" />
-  <br><em>Settings and Security</em>
+  <img src="screenshots/05-favorites.png" width="800" alt="Favorites" />
+</p>
+
+### ⚙️ Settings & Security
+<p align="center">
+  <img src="screenshots/06-settings.png" width="800" alt="Settings" />
 </p>
 
 ---
 
-## Features
+## ✨ Features
 
-- **Encrypted Vault** — AES-256-GCM encryption with Argon2id key derivation. Passwords never stored in plaintext.
-- **Multi-User Isolation** — Each user has a separate encrypted vault. User A cannot access User B's data.
-- **Browser Automation** — Playwright-based auto-login with email/password fill and MFA pause.
-- **Export/Import** — Transfer encrypted vault between machines via backup files.
-- **Favorites and Search** — Pin frequently-used clients, search by name/email/tags/environment.
-- **Auto-Lock** — Vault locks after 15 minutes of inactivity. Keys zeroed from memory.
-- **Cross-Platform** — Linux, Windows, and macOS.
+| Feature | Description |
+|---------|-------------|
+| 🔒 **Encrypted Vault** | AES-256-GCM encryption with Argon2id key derivation |
+| 👥 **Multi-User Isolation** | Each user has a separate encrypted vault — User A cannot see User B's data |
+| 🌐 **Browser Automation** | Playwright-based auto-login (email, password fill) with MFA pause |
+| 📦 **Export/Import** | Transfer your vault between machines via encrypted backup files |
+| ⭐ **Favorites** | Pin frequently-used clients for one-click access |
+| 🔍 **Instant Search** | Search by client name, email, tags, or environment |
+| 🕐 **Auto-Lock** | Vault auto-locks after 15 minutes of inactivity |
+| 🎨 **Premium UI** | Apple/Stripe/Vercel-inspired dark theme with animations |
+| 💻 **Cross-Platform** | Works on Linux, Windows, and macOS |
 
 ---
 
-## Installation
+## 🏗️ Architecture
 
-### Ubuntu / Debian
+```
+┌─────────────────────────────────────────────────────────┐
+│                    AWS Login Hub                          │
+├─────────────────────────────────────────────────────────┤
+│  Frontend (React + TypeScript + Tailwind + Framer Motion)│
+├─────────────────────────────────────────────────────────┤
+│  Tauri IPC Bridge                                        │
+├─────────────────────────────────────────────────────────┤
+│  Backend (Rust)                                          │
+│  ├── Vault (AES-256-GCM + Argon2id)                    │
+│  ├── SQLite (client metadata)                           │
+│  ├── Playwright Runner (Node.js subprocess)             │
+│  └── File Dialog (native OS)                            │
+├─────────────────────────────────────────────────────────┤
+│  OS Layer                                                │
+│  └── ~/.aws-login-hub/ (encrypted vault files)          │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔐 Security Model
+
+```
+Master Password (never stored)
+        ↓
+Argon2id Key Derivation (memory-hard, GPU-resistant)
+        ↓
+256-bit Encryption Key (held in memory only while unlocked)
+        ↓
+AES-256-GCM Encrypts/Decrypts vault file
+        ↓
+Vault auto-locks → key zeroed from memory (zeroize crate)
+```
+
+**Security guarantees:**
+- Passwords are NEVER stored in plaintext
+- Master password is NEVER saved to disk
+- No network calls — everything is local
+- Vault file is useless without the master password
+- Each user's vault is independently encrypted
+- Keys are securely wiped from RAM on lock
+
+---
+
+## 📦 Installation
+
+### Option 1: Ubuntu / Debian (Recommended)
+
+Copy-paste these 3 commands:
 
 ```bash
 wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/download/v0.2.0/aws-login-hub_0.2.0_amd64.deb
 sudo dpkg -i aws-login-hub_0.2.0_amd64.deb
-```
-
-The app appears in your application menu. Run it anytime with:
-
-```bash
 aws-login-hub
 ```
 
-### Fedora / RHEL / CentOS
+That's it. The app is installed and running. Find it in your application menu as "AWS Login Hub".
+
+To uninstall later:
+```bash
+sudo apt remove aws-login-hub
+```
+
+---
+
+### Option 2: Fedora / RHEL / CentOS
 
 ```bash
 wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/download/v0.2.0/aws-login-hub-0.2.0-1.x86_64.rpm
@@ -79,7 +138,14 @@ sudo rpm -i aws-login-hub-0.2.0-1.x86_64.rpm
 aws-login-hub
 ```
 
-### Any Linux (Portable, No Install)
+To uninstall:
+```bash
+sudo rpm -e aws-login-hub
+```
+
+---
+
+### Option 3: Any Linux (AppImage — No Install Needed)
 
 ```bash
 wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/download/v0.2.0/aws-login-hub_0.2.0_amd64.AppImage
@@ -87,13 +153,19 @@ chmod +x aws-login-hub_0.2.0_amd64.AppImage
 ./aws-login-hub_0.2.0_amd64.AppImage
 ```
 
-### Windows 10/11
+No root/sudo needed. Just download, make executable, and run.
 
-Build from source:
+---
 
-1. Install [Node.js LTS](https://nodejs.org) and [Rust](https://rustup.rs)
-2. Open PowerShell:
+### Option 4: Windows 10/11
 
+Pre-built Windows installer is not available yet. Build it yourself in 4 steps:
+
+**Step 1:** Install Node.js from https://nodejs.org (download LTS version, run the installer)
+
+**Step 2:** Install Rust from https://rustup.rs (open PowerShell, paste the command from the website)
+
+**Step 3:** Open PowerShell and run:
 ```powershell
 git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
 cd aws-login-hub
@@ -101,23 +173,30 @@ npm install
 npm run tauri build
 ```
 
-3. The installer is at `src-tauri\target\release\bundle\msi\AWS Login Hub_0.2.0_x64.msi`
-4. Double-click to install. Find the app in your Start Menu.
+**Step 4:** After build completes (~5 min), find the installer at:
+```
+src-tauri\target\release\bundle\msi\AWS Login Hub_0.2.0_x64.msi
+```
+Double-click the `.msi` file to install. App appears in Start Menu.
 
-### macOS
+---
 
-Build from source:
+### Option 5: macOS (Intel & Apple Silicon)
 
-1. Install prerequisites:
+Pre-built macOS installer is not available yet. Build it yourself in 4 steps:
 
+**Step 1:** Install Xcode Command Line Tools:
 ```bash
 xcode-select --install
+```
+
+**Step 2:** Install Node.js and Rust:
+```bash
 brew install node
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-2. Build:
-
+**Step 3:** Build the app:
 ```bash
 git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
 cd aws-login-hub
@@ -125,154 +204,50 @@ npm install
 npm run tauri build
 ```
 
-3. The installer is at `src-tauri/target/release/bundle/dmg/AWS Login Hub_0.2.0_x64.dmg`
-4. Open the `.dmg` and drag to Applications. Launch from Spotlight or Launchpad.
+**Step 4:** After build completes (~5 min), find the installer at:
+```
+src-tauri/target/release/bundle/dmg/AWS Login Hub_0.2.0_x64.dmg
+```
+Double-click the `.dmg`, drag the app to Applications. Launch from Spotlight or Launchpad.
 
-### Setup Playwright (Required for Login Automation)
+---
 
-After installing the app, install Playwright separately:
+### After Installation: Setup Playwright (Required for Login Automation)
 
 ```bash
 npm install -g playwright
 npx playwright install chromium
 ```
 
-Without this, credential storage works but the Login button cannot automate the browser.
+Without this, the app will work for storing credentials but the "Login" button won't be able to automate the browser.
 
 ---
 
-## How It Works
+### Verify Installation
 
-### First Launch
+After installing on any OS, verify it works:
 
-1. Open the app
-2. Create a profile with a master password
-3. An encrypted vault is created at `~/.aws-login-hub/`
-
-### Adding a Client
-
-Provide the following:
-- Client name (e.g., "Netflix Production")
-- Identity Center URL (e.g., `https://d-xxxxxxxxxx.awsapps.com/start`)
-- Email address
-- Password (encrypted and stored in vault)
-- Environment and tags (optional, for organization)
-
-### Login Automation
-
-When you click Login on a client:
-
-1. Password is decrypted from the vault (in-memory only)
-2. Chromium launches via Playwright
-3. Navigates to the Identity Center URL
-4. Fills email, clicks Next
-5. Fills password, clicks Submit
-6. Pauses at MFA screen — you complete MFA manually
-7. AWS Console opens
-8. Last Login timestamp is updated
-
-MFA is never automated or bypassed.
-
-### Export / Import
-
-To use the app on another machine:
-
-1. Go to Settings, click Export Vault
-2. Save the `.vault-backup` file (it is encrypted)
-3. Copy the file to the new machine
-4. Install the app, go to Settings, click Import Vault
-5. Select the file, enter your master password
-
-The backup file is AES-256-GCM encrypted. It is safe to store anywhere.
-
----
-
-## Security
-
-| Property | Implementation |
-|----------|---------------|
-| Encryption at rest | AES-256-GCM |
-| Key derivation | Argon2id (memory-hard, GPU-resistant) |
-| Master password | Never stored on disk |
-| Memory handling | Keys zeroed on vault lock (zeroize) |
-| User isolation | Separate encrypted vault per user |
-| Network | No network calls. Entirely local. |
-| MFA | Never bypassed or automated |
-
----
-
-## Architecture
-
-```
-Frontend         React + TypeScript + Tailwind CSS + Framer Motion
-IPC              Tauri command bridge
-Backend          Rust (compiled native binary)
-Encryption       aes-gcm + argon2 + zeroize crates
-Database         SQLite (rusqlite, per-user)
-Automation       Playwright (Chromium, non-headless)
-Dialogs          tauri-plugin-dialog (native OS file picker)
-```
-
-### Data Storage
-
-```
-~/.aws-login-hub/
-├── users.json              User profiles (metadata only)
-├── <username>.vault.enc    Encrypted credentials (AES-256-GCM)
-└── <username>.db           Client metadata (SQLite)
-```
-
----
-
-## Build from Source
-
-### Prerequisites
-
-- Node.js 18+
-- Rust 1.70+
-- Linux: `sudo apt install libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev libsoup-3.0-dev build-essential`
-- Windows: WebView2 (included in Windows 10/11)
-- macOS: Xcode Command Line Tools
-
-### Development
-
+**Linux:**
 ```bash
-git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
-cd aws-login-hub
-npm install
-npm run tauri dev
+# Check it's installed
+which aws-login-hub
+
+# Run it
+aws-login-hub
 ```
+You'll also find "AWS Login Hub" in your application menu (Activities → search "AWS Login Hub").
 
-### Production Build
+**Windows:**
+- Open Start Menu → search "AWS Login Hub" → click to open
+- Or press `Win + S`, type "AWS Login Hub"
 
-```bash
-npm run tauri build
-```
-
-Build outputs by platform:
-
-| Platform | Output |
-|----------|--------|
-| Ubuntu/Debian | `src-tauri/target/release/bundle/deb/*.deb` |
-| Fedora/RHEL | `src-tauri/target/release/bundle/rpm/*.rpm` |
-| Portable Linux | `src-tauri/target/release/bundle/appimage/*.AppImage` |
-| Windows | `src-tauri/target/release/bundle/msi/*.msi` |
-| macOS | `src-tauri/target/release/bundle/dmg/*.dmg` |
+**macOS:**
+- Open Spotlight (`Cmd + Space`) → type "AWS Login Hub" → press Enter
+- Or find it in Launchpad
 
 ---
 
-## Tests
-
-```bash
-cd src-tauri
-cargo test
-```
-
-20 tests covering vault encryption, user isolation, credential CRUD, master password change, export/import, search, favorites, and dashboard statistics.
-
----
-
-## Uninstall
+### 🗑️ Uninstall
 
 **Ubuntu/Debian:**
 ```bash
@@ -284,25 +259,257 @@ sudo apt remove aws-login-hub
 sudo rpm -e aws-login-hub
 ```
 
+**AppImage:**
+```bash
+rm aws-login-hub_0.2.0_amd64.AppImage
+```
+
 **Windows:**
-Settings → Apps → AWS Login Hub → Uninstall
+- Settings → Apps → search "AWS Login Hub" → Uninstall
 
 **macOS:**
-Drag from Applications to Trash
+- Drag from Applications to Trash
 
-**Remove all stored data:**
+**Remove vault data (all platforms):**
 ```bash
 rm -rf ~/.aws-login-hub
 ```
 
 ---
 
-## License
+## 🛠️ Build From Source
+
+### Prerequisites
+
+| Tool | Version | Install |
+|------|---------|---------|
+| **Node.js** | 18+ | `nvm install 18` |
+| **Rust** | 1.70+ | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| **Playwright** | Latest | `npm install -g playwright && npx playwright install chromium` |
+
+**Linux additional dependencies:**
+```bash
+sudo apt install -y libwebkit2gtk-4.1-dev librsvg2-dev libssl-dev libsoup-3.0-dev build-essential
+```
+
+**Windows additional:**
+- WebView2 (built into Windows 10/11)
+- Visual Studio Build Tools
+
+**macOS additional:**
+- Xcode Command Line Tools: `xcode-select --install`
+
+### Build
+
+```bash
+# Clone
+git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
+cd aws-login-hub
+
+# Install dependencies
+npm install
+
+# Development mode (hot-reload)
+npm run tauri dev
+
+# Production build
+npm run tauri build
+```
+
+### Build Outputs
+
+| Platform | Output |
+|----------|--------|
+| Linux | `src-tauri/target/release/bundle/deb/*.deb` |
+| Linux | `src-tauri/target/release/bundle/appimage/*.AppImage` |
+| Linux | `src-tauri/target/release/bundle/rpm/*.rpm` |
+| Windows | `src-tauri/target/release/bundle/msi/*.msi` |
+| macOS | `src-tauri/target/release/bundle/dmg/*.dmg` |
+
+---
+
+## 🚀 How It Works
+
+### First Launch
+
+1. App opens → "Create Profile" screen
+2. Enter username + master password
+3. An encrypted vault is created at `~/.aws-login-hub/username.vault.enc`
+4. You're logged in
+
+### Adding a Client
+
+1. Go to **Clients** → **+ Add Client**
+2. Fill in:
+   - **Client Name** — e.g., "Netflix Production"
+   - **Identity Center URL** — e.g., `https://d-xxxxxxxxxx.awsapps.com/start`
+   - **Email** — your AWS SSO email
+   - **Password** — stored encrypted in your vault
+   - **Environment** — Production, Development, Staging, etc.
+   - **Tags** — for search/filtering
+
+### Login Flow
+
+```
+Click "Login" on a client
+        ↓
+App retrieves password from encrypted vault (in-memory decrypt)
+        ↓
+Launches Chromium via Playwright
+        ↓
+Navigates to Identity Center URL
+        ↓
+Auto-fills email → clicks Next
+        ↓
+Auto-fills password → clicks Submit
+        ↓
+⏸️  PAUSES — waiting for MFA
+        ↓
+You complete MFA manually in the browser
+        ↓
+AWS Console opens
+        ↓
+App updates "Last Login" timestamp
+```
+
+> ⚠️ **MFA is NEVER bypassed** — the automation pauses and lets you complete it manually.
+
+### Export/Import (Transfer Between Machines)
+
+**Export:**
+1. Settings → Export Vault → Choose save location
+2. Creates an encrypted `.vault-backup` file
+
+**Import (on new machine):**
+1. Install app → Settings → Import Vault
+2. Select the `.vault-backup` file
+3. Enter your master password
+4. Done — all clients and credentials restored
+
+The backup file is AES-256-GCM encrypted. Safe to store on USB, Google Drive, email, etc.
+
+---
+
+## 📁 Data Storage
+
+```
+~/.aws-login-hub/
+├── users.json              ← User profiles (public metadata only)
+├── gourav.vault.enc        ← Gourav's encrypted passwords (AES-256-GCM)
+├── gourav.db               ← Gourav's client metadata (SQLite)
+├── alice.vault.enc         ← Alice's encrypted passwords (separate key!)
+└── alice.db                ← Alice's client metadata
+```
+
+- **Vault files** — Binary encrypted blobs. Useless without the master password.
+- **DB files** — Contains client names, URLs, emails, tags (no passwords).
+- **users.json** — List of profiles with password hashes (for verification only).
+
+---
+
+## 🧪 Running Tests
+
+```bash
+cd src-tauri
+cargo test
+```
+
+**Test coverage:**
+- User creation & deletion
+- Vault encryption/decryption
+- Correct/wrong password handling
+- Multi-user isolation
+- Credential CRUD
+- Master password change
+- Special characters in passwords
+- Vault export/import
+- Client search functionality
+- Dashboard statistics
+- Favorites & recent tracking
+
+---
+
+## 🖥️ Cross-Platform Build Guide
+
+### Build for Linux (on Linux)
+
+```bash
+npm run tauri build
+# Outputs: .deb, .rpm, .AppImage
+```
+
+### Build for Windows (on Windows)
+
+```powershell
+# Ensure Rust + Node.js + WebView2 are installed
+npm install
+npm run tauri build
+# Output: .msi installer
+```
+
+### Build for macOS (on macOS)
+
+```bash
+# Ensure Rust + Node.js + Xcode CLI tools are installed
+npm install
+npm run tauri build
+# Output: .dmg installer
+```
+
+> **Note:** Cross-compilation is complex. Build natively on each OS for best results. For automated multi-platform builds, use GitHub Actions with matrix strategy.
+
+---
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make changes
+4. Run tests: `cd src-tauri && cargo test`
+5. Commit: `git commit -m "Add feature"`
+6. Push: `git push origin feature/my-feature`
+7. Open a Pull Request
+
+---
+
+## 📜 Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Desktop Framework | Tauri 2 |
+| Frontend | React 19 + TypeScript |
+| Styling | Tailwind CSS 4 |
+| Animations | Framer Motion |
+| Backend | Rust |
+| Database | SQLite (rusqlite) |
+| Encryption | AES-256-GCM (aes-gcm crate) |
+| Key Derivation | Argon2id (argon2 crate) |
+| Memory Safety | Zeroize |
+| Browser Automation | Playwright |
+| File Dialogs | tauri-plugin-dialog |
+| Icons | Lucide React |
+
+---
+
+## 📄 License
 
 MIT
 
 ---
 
-<div align="center">
-  <sub>Built for DevOps engineers who manage multiple AWS accounts.</sub>
-</div>
+## ⚠️ Disclaimer
+
+This tool automates **repetitive login steps** (email/password entry) for AWS Identity Center. It does **NOT**:
+- Bypass MFA
+- Store session tokens
+- Access AWS APIs
+- Replace AWS CLI SSO
+
+It's a productivity tool for DevOps engineers managing multiple AWS accounts who are tired of typing the same email and password dozens of times per day.
+
+---
+
+<p align="center">
+  <b>Built with ❤️ for DevOps Engineers</b><br>
+  <sub>Secure • Fast • Cross-Platform</sub>
+</p>
