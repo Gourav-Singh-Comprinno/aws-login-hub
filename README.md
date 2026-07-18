@@ -157,35 +157,58 @@ No root/sudo needed. Just download, make executable, and run.
 
 ---
 
-### Option 4: Windows
+### Option 4: Windows 10/11
 
-> Build from source on a Windows machine (see Build From Source below).
-> Windows `.msi` installer will be available in future releases.
+Pre-built Windows installer is not available yet. Build it yourself in 4 steps:
 
+**Step 1:** Install Node.js from https://nodejs.org (download LTS version, run the installer)
+
+**Step 2:** Install Rust from https://rustup.rs (open PowerShell, paste the command from the website)
+
+**Step 3:** Open PowerShell and run:
 ```powershell
 git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
 cd aws-login-hub
 npm install
 npm run tauri build
-# Output: src-tauri\target\release\bundle\msi\AWS Login Hub_0.2.0_x64.msi
-# Double-click the .msi to install
 ```
+
+**Step 4:** After build completes (~5 min), find the installer at:
+```
+src-tauri\target\release\bundle\msi\AWS Login Hub_0.2.0_x64.msi
+```
+Double-click the `.msi` file to install. App appears in Start Menu.
 
 ---
 
-### Option 5: macOS
+### Option 5: macOS (Intel & Apple Silicon)
 
-> Build from source on a Mac (see Build From Source below).
-> macOS `.dmg` installer will be available in future releases.
+Pre-built macOS installer is not available yet. Build it yourself in 4 steps:
 
+**Step 1:** Install Xcode Command Line Tools:
+```bash
+xcode-select --install
+```
+
+**Step 2:** Install Node.js and Rust:
+```bash
+brew install node
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+**Step 3:** Build the app:
 ```bash
 git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
 cd aws-login-hub
 npm install
 npm run tauri build
-# Output: src-tauri/target/release/bundle/dmg/AWS Login Hub_0.2.0_x64.dmg
-# Double-click the .dmg to install
 ```
+
+**Step 4:** After build completes (~5 min), find the installer at:
+```
+src-tauri/target/release/bundle/dmg/AWS Login Hub_0.2.0_x64.dmg
+```
+Double-click the `.dmg`, drag the app to Applications. Launch from Spotlight or Launchpad.
 
 ---
 
