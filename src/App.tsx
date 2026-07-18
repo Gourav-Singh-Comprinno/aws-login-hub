@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { LayoutDashboard, Users, Star, Clock, Settings, Shield, Lock, Zap, Terminal as TermIcon } from "lucide-react";
+import { LayoutDashboard, Users, Star, Clock, Settings, Shield, Lock, Zap, Terminal as TermIcon, Download } from "lucide-react";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type { Page } from "./types";
 import { api, type UserInfo } from "./services/api";
 import Dashboard from "./pages/Dashboard";
@@ -15,6 +17,38 @@ function App() {
   const [currentUser, setCurrentUser] = useState<UserInfo | null>(null);
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
   const lastActivityRef = useRef(Date.now());
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; body: string } | null>(null);
+  const [updating, setUpdating] = useState(false);
+
+  // Check for updates on startup
+  useEffect(() => {
+    checkForUpdates();
+  }, []);
+
+  async function checkForUpdates() {
+    try {
+      const update = await check();
+      if (update) {
+        setUpdateAvailable({ version: update.version, body: update.body || "" });
+      }
+    } catch (e) {
+      console.log("Update check failed:", e);
+    }
+  }
+
+  async function handleUpdate() {
+    setUpdating(true);
+    try {
+      const update = await check();
+      if (update) {
+        await update.downloadAndInstall();
+        await relaunch();
+      }
+    } catch (e) {
+      console.error("Update failed:", e);
+      setUpdating(false);
+    }
+  }
 
   useEffect(() => {
     const checkIdle = setInterval(() => {
@@ -57,7 +91,37 @@ function App() {
   ];
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
+    <div className="flex flex-col h-screen w-screen overflow-hidden">
+      {/* Update Banner */}
+      <AnimatePresence>
+        {updateAvailable && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="bg-gradient-to-r from-[#FF9900]/10 to-[#FF6B4A]/10 border-b border-[#FF9900]/20 px-4 py-2.5 flex items-center justify-center gap-3"
+          >
+            <Download size={14} className="text-[#FF9900]" />
+            <span className="text-[12px] text-zinc-300">
+              <strong className="text-[#FF9900]">v{updateAvailable.version}</strong> is available
+            </span>
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              onClick={handleUpdate}
+              disabled={updating}
+              className="px-3 py-1 rounded-lg bg-[#FF9900]/20 border border-[#FF9900]/30 text-[11px] font-medium text-[#FF9900] hover:bg-[#FF9900]/30 transition-colors disabled:opacity-50"
+            >
+              {updating ? "Updating..." : "Update Now"}
+            </motion.button>
+            <button onClick={() => setUpdateAvailable(null)} className="text-zinc-500 hover:text-zinc-300 text-[11px] ml-2">
+              Later
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <div className="flex flex-1 overflow-hidden">
       {/* Premium Sidebar */}
       <aside className="w-[220px] min-w-[220px] sidebar flex flex-col h-full overflow-hidden">
         <div className="p-5 pb-6">
@@ -123,6 +187,7 @@ function App() {
           </motion.div>
         </AnimatePresence>
       </main>
+      </div>
     </div>
   );
 }
