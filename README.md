@@ -111,49 +111,92 @@ Vault auto-locks → key zeroed from memory (zeroize crate)
 
 ## 📦 Installation
 
-### Linux (Ubuntu/Debian)
+### Option 1: Ubuntu / Debian (Recommended)
+
+Copy-paste these 3 commands:
 
 ```bash
-# Download the .deb package from Releases page
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub_amd64.deb
-
-# Install
-sudo dpkg -i aws-login-hub_amd64.deb
-
-# Run
+wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/download/v0.2.0/aws-login-hub_0.2.0_amd64.deb
+sudo dpkg -i aws-login-hub_0.2.0_amd64.deb
 aws-login-hub
 ```
 
-Or use the **AppImage** (no installation needed):
+That's it. The app is installed and running. Find it in your application menu as "AWS Login Hub".
+
+To uninstall later:
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub_amd64.AppImage
-chmod +x aws-login-hub_amd64.AppImage
-./aws-login-hub_amd64.AppImage
+sudo apt remove aws-login-hub
 ```
 
-### Linux (Fedora/RHEL)
+---
+
+### Option 2: Fedora / RHEL / CentOS
 
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub.x86_64.rpm
-sudo rpm -i aws-login-hub.x86_64.rpm
+wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/download/v0.2.0/aws-login-hub-0.2.0-1.x86_64.rpm
+sudo rpm -i aws-login-hub-0.2.0-1.x86_64.rpm
 aws-login-hub
 ```
 
-### Windows
-
-```
-1. Download aws-login-hub_0.2.0_x64.msi from Releases
-2. Double-click to install
-3. Find "AWS Login Hub" in Start Menu
+To uninstall:
+```bash
+sudo rpm -e aws-login-hub
 ```
 
-### macOS
+---
 
+### Option 3: Any Linux (AppImage — No Install Needed)
+
+```bash
+wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/download/v0.2.0/aws-login-hub_0.2.0_amd64.AppImage
+chmod +x aws-login-hub_0.2.0_amd64.AppImage
+./aws-login-hub_0.2.0_amd64.AppImage
 ```
-1. Download aws-login-hub_0.2.0_x64.dmg from Releases
-2. Drag to Applications folder
-3. Open from Launchpad
+
+No root/sudo needed. Just download, make executable, and run.
+
+---
+
+### Option 4: Windows
+
+> Build from source on a Windows machine (see Build From Source below).
+> Windows `.msi` installer will be available in future releases.
+
+```powershell
+git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
+cd aws-login-hub
+npm install
+npm run tauri build
+# Output: src-tauri\target\release\bundle\msi\AWS Login Hub_0.2.0_x64.msi
+# Double-click the .msi to install
 ```
+
+---
+
+### Option 5: macOS
+
+> Build from source on a Mac (see Build From Source below).
+> macOS `.dmg` installer will be available in future releases.
+
+```bash
+git clone https://github.com/Gourav-Singh-Comprinno/aws-login-hub.git
+cd aws-login-hub
+npm install
+npm run tauri build
+# Output: src-tauri/target/release/bundle/dmg/AWS Login Hub_0.2.0_x64.dmg
+# Double-click the .dmg to install
+```
+
+---
+
+### After Installation: Setup Playwright (Required for Login Automation)
+
+```bash
+npm install -g playwright
+npx playwright install chromium
+```
+
+Without this, the app will work for storing credentials but the "Login" button won't be able to automate the browser.
 
 ---
 
