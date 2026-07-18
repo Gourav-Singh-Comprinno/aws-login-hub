@@ -42,4 +42,21 @@ export const api = {
   async getDashboardStats(): Promise<DashboardStats> { return invoke("get_dashboard_stats"); },
   async updateLastLogin(id: string): Promise<void> { return invoke("update_last_login", { id }); },
   async getClientPassword(id: string): Promise<string> { return invoke("get_client_password", { id }); },
+
+  // AWS CLI
+  async generateAwsConfig(): Promise<string> { return invoke("generate_aws_config"); },
+  async getAwsProfiles(): Promise<string[]> { return invoke("get_aws_profiles"); },
+
+  // Session Management
+  async getSessionStatus(id: string): Promise<string> { return invoke("get_session_status", { id }); },
+
+  // Password Expiration
+  async checkPasswordExpiry(): Promise<boolean> { return invoke("check_password_expiry"); },
+  async refreshPasswordExpiry(): Promise<void> { return invoke("refresh_password_expiry"); },
+
+  // Terminal
+  async runTerminalCommand(command: string, profile: string): Promise<string> { return invoke("run_terminal_command", { command, profile }); },
+
+  // Biometric
+  async checkBiometricAvailable(): Promise<boolean> { return invoke("check_biometric_available"); },
 };

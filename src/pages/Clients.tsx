@@ -78,7 +78,7 @@ export default function Clients() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-3">
                   <h3 className="font-semibold text-white text-[15px] truncate">{client.name}</h3>
-                  {client.status === "active" && <div className="status-dot bg-green-400" />}
+                  <SessionDot clientId={client.id} lastLogin={client.last_login} />
                   {client.environment && <span className="premium-badge bg-purple-500/10 text-purple-400 border border-purple-500/20">{client.environment}</span>}
                 </div>
                 <div className="flex items-center gap-4 mt-1.5">
@@ -222,5 +222,28 @@ function Field({ label, placeholder, value, onChange, type = "text", icon }: { l
         <input type={type} className={`premium-input ${icon ? "pl-10" : ""}`} placeholder={placeholder} value={value} onChange={e => onChange(e.target.value)} />
       </div>
     </div>
+  );
+}
+
+function SessionDot({ clientId: _clientId, lastLogin }: { clientId: string; lastLogin: string | null }) {
+  if (!lastLogin) return <span className="premium-badge bg-zinc-800 text-zinc-500 border border-zinc-700">Never</span>;
+
+  const loginTime = new Date(lastLogin).getTime();
+  const elapsed = Date.now() - loginTime;
+  const oneHour = 60 * 60 * 1000;
+
+  if (elapsed < oneHour) {
+    return (
+      <span className="flex items-center gap-1.5">
+        <div className="status-dot bg-green-400" />
+        <span className="text-[11px] text-green-400 font-medium">Active</span>
+      </span>
+    );
+  }
+  return (
+    <span className="flex items-center gap-1.5">
+      <div className="w-2 h-2 rounded-full bg-zinc-600" />
+      <span className="text-[11px] text-zinc-500">Expired</span>
+    </span>
   );
 }

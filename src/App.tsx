@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { LayoutDashboard, Users, Star, Clock, Settings, Shield, Lock, Zap } from "lucide-react";
+import { LayoutDashboard, Users, Star, Clock, Settings, Shield, Lock, Zap, Terminal as TermIcon } from "lucide-react";
 import type { Page } from "./types";
 import { api, type UserInfo } from "./services/api";
 import Dashboard from "./pages/Dashboard";
 import Clients from "./pages/Clients";
 import Favorites from "./pages/Favorites";
 import Recent from "./pages/Recent";
+import Terminal from "./pages/Terminal";
 import SettingsPage from "./pages/Settings";
 
 function App() {
@@ -29,7 +30,13 @@ function App() {
     return () => { window.removeEventListener("mousemove", reset); window.removeEventListener("keydown", reset); };
   }, []);
 
-  const handleUnlock = (user: UserInfo) => { setCurrentUser(user); setUnlocked(true); setLastActivity(Date.now()); };
+  const handleUnlock = async (user: UserInfo) => {
+    setCurrentUser(user);
+    setUnlocked(true);
+    setLastActivity(Date.now());
+    // Refresh password expiry marker
+    api.refreshPasswordExpiry().catch(() => {});
+  };
   const handleLock = async () => { await api.lockVault(); setUnlocked(false); setCurrentUser(null); setCurrentPage("dashboard"); };
 
   if (!unlocked) return <UnlockScreen onUnlock={handleUnlock} />;
@@ -39,6 +46,7 @@ function App() {
     { id: "clients", label: "Clients", icon: <Users size={18} /> },
     { id: "favorites", label: "Favorites", icon: <Star size={18} /> },
     { id: "recent", label: "Recent", icon: <Clock size={18} /> },
+    { id: "terminal", label: "Terminal", icon: <TermIcon size={18} /> },
     { id: "settings", label: "Settings", icon: <Settings size={18} /> },
   ];
 
@@ -104,6 +112,7 @@ function App() {
             {currentPage === "clients" && <Clients />}
             {currentPage === "favorites" && <Favorites />}
             {currentPage === "recent" && <Recent />}
+            {currentPage === "terminal" && <Terminal />}
             {currentPage === "settings" && <SettingsPage currentUser={currentUser} onLock={handleLock} />}
           </motion.div>
         </AnimatePresence>
@@ -142,6 +151,15 @@ function UnlockScreen({ onUnlock }: { onUnlock: (user: UserInfo) => void }) {
     setError(""); setLoading(true);
     try {
       const user = await api.unlockVault(selectedUser, password);
+      // Check if password has expired (2 weeks)
+      const expired = await api.checkPasswordExpiry().catch(() => false);
+      if (expired) {
+        await api.lockVault();
+        setError("Your session has expired (2 weeks). Please re-enter your master password to continue.");
+        setLoading(false);
+        return;
+      }
+      await api.refreshPasswordExpiry().catch(() => {});
       setPassword(""); onUnlock(user);
     } catch (err) { setError(String(err)); }
     setLoading(false);

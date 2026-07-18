@@ -41,4 +41,4 @@ export interface DashboardStats {
   recent_clients: Client[];
 }
 
-export type Page = "dashboard" | "clients" | "favorites" | "recent" | "settings";
+export type Page = "dashboard" | "clients" | "favorites" | "recent" | "terminal" | "settings";
