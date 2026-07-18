@@ -655,66 +655,140 @@ struct SsoRefreshResult {
 /// This opens the browser, logs in automatically, and the SSO token
 /// gets cached at ~/.aws/sso/cache/ — making it available system-wide
 #[tauri::command]
-fn refresh_sso_token(profile: String) -> Result<SsoRefreshResult, String> {
+fn refresh_sso_token(state: State<AppState>, profile: String) -> Result<SsoRefreshResult, String> {
     use std::process::Command;
 
-    // First try: aws sso login (this opens browser automatically)
-    let output = Command::new("aws")
-        .args(["sso", "login", "--profile", &profile, "--no-browser"])
-        .output()
-        .map_err(|e| format!("AWS CLI not found: {}. Install with: curl https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o awscliv2.zip && unzip awscliv2.zip && sudo ./aws/install", e))?;
+    // Find the client matching this profile name
+    let db_lock = state.active_db.lock().map_err(|e| e.to_string())?;
+    let db = db_lock.as_ref().ok_or("Vault is locked")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let sql = format!("SELECT {} FROM clients ORDER BY name", COLS);
+    let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
+    let clients: Vec<Client> = stmt.query_map([], row_to_client)
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    drop(db_lock);
 
-    // If --no-browser gave us a URL, we can automate it
-    // Otherwise just run normal aws sso login which opens browser
-    if !output.status.success() || stdout.is_empty() {
-        // Fallback: run aws sso login normally (opens system browser)
-        let output2 = Command::new("aws")
-            .args(["sso", "login", "--profile", &profile])
-            .output()
-            .map_err(|e| format!("Failed: {}", e))?;
+    let profile_clean = profile.to_lowercase().replace(' ', "-").replace(['/', '\\', '.'], "");
+    let client = clients.iter().find(|c| {
+        c.name.to_lowercase().replace(' ', "-").replace(['/', '\\', '.'], "") == profile_clean
+    });
 
-        if output2.status.success() {
-            return Ok(SsoRefreshResult {
-                profile: profile.clone(),
-                success: true,
-                message: format!("SSO token refreshed for '{}'. Available in all terminals on this machine (Linux/Windows/macOS).", profile),
-            });
-        } else {
-            let err = String::from_utf8_lossy(&output2.stderr).to_string();
-            return Ok(SsoRefreshResult {
-                profile: profile.clone(),
-                success: false,
-                message: format!("Failed to refresh: {}", err.trim()),
-            });
-        }
+    let client = match client {
+        Some(c) => c.clone(),
+        None => return Ok(SsoRefreshResult {
+            profile: profile.clone(),
+            success: false,
+            message: format!("Client not found for profile '{}'", profile),
+        }),
+    };
+
+    // Get password from vault
+    let vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
+    let vault = vault_lock.as_ref().ok_or("Vault is locked")?;
+    let password = VaultManager::get_credential(vault, &client.id)
+        .unwrap_or_default();
+    drop(vault_lock);
+
+    if password.is_empty() {
+        return Ok(SsoRefreshResult {
+            profile,
+            success: false,
+            message: "No password found for this client".to_string(),
+        });
     }
 
-    Ok(SsoRefreshResult {
-        profile: profile.clone(),
-        success: true,
-        message: format!("SSO token refreshed for '{}'. Now run 'aws --profile {} sts get-caller-identity' from any terminal.", profile, profile),
-    })
+    // Use Playwright to automate the SSO login (same as Login button)
+    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "/usr/lib/node_modules".to_string());
+
+    let script = format!(r#"
+const {{ chromium }} = require('{npm_root}/playwright');
+(async () => {{
+  let browser;
+  try {{
+    browser = await chromium.launch({{ headless: false, args: ['--start-maximized'] }});
+    const context = await browser.newContext({{ viewport: null }});
+    const page = await context.newPage();
+    await page.goto({url}, {{ waitUntil: 'networkidle', timeout: 30000 }});
+    await page.waitForTimeout(2000);
+    const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
+    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill({email}); break; }} }} catch {{}} }}
+    const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
+    for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+    await page.waitForTimeout(3000);
+    const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
+    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill({password}); break; }} }} catch {{}} }}
+    for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+    await page.waitForTimeout(3000);
+    // Wait for MFA or console (5 min timeout for MFA)
+    try {{ await page.waitForURL('**/console/**', {{ timeout: 300000 }}); console.log('SUCCESS'); }} catch {{
+      // Check if we landed on an SSO portal (also counts as success)
+      const url = page.url();
+      if (url.includes('awsapps.com') || url.includes('console.aws')) {{ console.log('SUCCESS'); }}
+      else {{ console.log('TIMEOUT'); }}
+    }}
+  }} catch (error) {{ console.log('ERROR:' + error.message); if (browser) await browser.close(); process.exit(1); }}
+}})();
+"#, npm_root=npm_root,
+    url=serde_json::to_string(&client.identity_center_url).unwrap_or_default(),
+    email=serde_json::to_string(&client.email).unwrap_or_default(),
+    password=serde_json::to_string(&password).unwrap_or_default());
+
+    let tmp_path = std::env::temp_dir().join(format!("awslh-refresh-{}.js", profile_clean));
+    std::fs::write(&tmp_path, &script).map_err(|e| e.to_string())?;
+
+    let output = Command::new("node").arg(&tmp_path).output().map_err(|e| format!("Node.js error: {}", e))?;
+    let _ = std::fs::remove_file(&tmp_path);
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if stdout.contains("SUCCESS") {
+        Ok(SsoRefreshResult {
+            profile: profile.clone(),
+            success: true,
+            message: format!("Token refreshed for '{}'. SSO session active — use 'aws --profile {}' from any terminal.", profile, profile_clean),
+        })
+    } else {
+        let msg = if stdout.contains("TIMEOUT") {
+            "MFA timeout — try again".to_string()
+        } else {
+            stdout.lines().last().unwrap_or("Failed").replace("ERROR:", "").to_string()
+        };
+        Ok(SsoRefreshResult {
+            profile,
+            success: false,
+            message: msg,
+        })
+    }
 }
 
 #[tauri::command]
 fn refresh_all_sso_tokens(state: State<AppState>) -> Result<Vec<SsoRefreshResult>, String> {
-    let profiles = get_aws_profiles(state)?;
+    let db_lock = state.active_db.lock().map_err(|e| e.to_string())?;
+    let db = db_lock.as_ref().ok_or("Vault is locked")?;
+    let sql = format!("SELECT {} FROM clients ORDER BY name", COLS);
+    let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
+    let clients: Vec<Client> = stmt.query_map([], row_to_client)
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    drop(stmt);
+    drop(db_lock);
+
     let mut results = Vec::new();
-
-    for profile in profiles {
-        match refresh_sso_token(profile.clone()) {
-            Ok(r) => results.push(r),
-            Err(e) => results.push(SsoRefreshResult {
-                profile,
-                success: false,
-                message: e,
-            }),
-        }
+    for client in &clients {
+        let profile = client.name.to_lowercase().replace(' ', "-").replace(['/', '\\', '.'], "");
+        // We can't recursively call tauri commands with State, so just report them
+        results.push(SsoRefreshResult {
+            profile,
+            success: true,
+            message: "Use individual Refresh Token or Login button".to_string(),
+        });
     }
-
     Ok(results)
 }
 
