@@ -12,6 +12,40 @@ A premium desktop application for managing multiple AWS Identity Center (AWS SSO
 
 ---
 
+## 📸 Screenshots
+
+### 🔒 Vault Unlock Screen
+<p align="center">
+  <img src="screenshots/01-unlock-screen.png" width="800" alt="Vault Unlock Screen" />
+</p>
+
+### 👤 Create Profile
+<p align="center">
+  <img src="screenshots/02-create-profile.png" width="800" alt="Create Profile" />
+</p>
+
+### 📊 Dashboard
+<p align="center">
+  <img src="screenshots/03-dashboard.png" width="800" alt="Dashboard" />
+</p>
+
+### 👥 Clients Management
+<p align="center">
+  <img src="screenshots/04-clients.png" width="800" alt="Clients" />
+</p>
+
+### ⭐ Favorites
+<p align="center">
+  <img src="screenshots/05-favorites.png" width="800" alt="Favorites" />
+</p>
+
+### ⚙️ Settings & Security
+<p align="center">
+  <img src="screenshots/06-settings.png" width="800" alt="Settings" />
+</p>
+
+---
+
 ## ✨ Features
 
 | Feature | Description |
