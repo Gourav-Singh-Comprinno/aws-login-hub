@@ -143,6 +143,11 @@ impl VaultManager {
             .map_err(|e| format!("Failed to write users file: {}", e))
     }
 
+    /// Public access to save_users (for import rollback)
+    pub fn save_users_public(&self, users: &[UserProfile]) -> Result<(), String> {
+        self.save_users(users)
+    }
+
     pub fn create_user(&self, username: &str, display_name: &str, master_password: &str) -> Result<UserProfile, String> {
         let mut users = self.load_users();
 

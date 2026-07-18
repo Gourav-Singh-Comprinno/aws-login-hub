@@ -7,11 +7,25 @@ use rusqlite::{Connection, params};
 use std::sync::Mutex;
 use tauri::State;
 use chrono::Utc;
-use vault::{VaultManager, UnlockedVault, UserProfile};
+use vault::{VaultManager, UnlockedVault};
 
 // ============================================================
 // Data Models
 // ============================================================
+
+/// Cross-OS helper: get user home directory consistently
+fn home_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| {
+                #[cfg(target_os = "windows")]
+                { std::env::var("HOMEDRIVE").unwrap_or_default() + &std::env::var("HOMEPATH").unwrap_or_default() }
+                #[cfg(not(target_os = "windows"))]
+                { "/tmp".to_string() }
+            })
+    )
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Client {
@@ -303,16 +317,32 @@ fn update_client(state: State<AppState>, id: String, request: UpdateClientReques
     }
 
     with_db(&state, |db| {
-        if let Some(ref v) = request.name { db.execute("UPDATE clients SET name=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.identity_center_url { db.execute("UPDATE clients SET identity_center_url=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.email { db.execute("UPDATE clients SET email=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.sso_region { db.execute("UPDATE clients SET sso_region=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.sso_account_id { db.execute("UPDATE clients SET sso_account_id=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.sso_role_name { db.execute("UPDATE clients SET sso_role_name=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.notes { db.execute("UPDATE clients SET notes=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.tags { db.execute("UPDATE clients SET tags=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(ref v) = request.environment { db.execute("UPDATE clients SET environment=?1, updated_at=?2 WHERE id=?3", params![v, now, id]).ok(); }
-        if let Some(v) = request.favorite { db.execute("UPDATE clients SET favorite=?1, updated_at=?2 WHERE id=?3", params![v as i32, now, id]).ok(); }
+        // Build a single UPDATE statement dynamically
+        let mut set_clauses: Vec<String> = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(ref v) = request.name { set_clauses.push("name=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.identity_center_url { set_clauses.push("identity_center_url=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.email { set_clauses.push("email=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.sso_region { set_clauses.push("sso_region=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.sso_account_id { set_clauses.push("sso_account_id=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.sso_role_name { set_clauses.push("sso_role_name=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.notes { set_clauses.push("notes=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.tags { set_clauses.push("tags=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(ref v) = request.environment { set_clauses.push("environment=?".to_string()); params_vec.push(Box::new(v.clone())); }
+        if let Some(v) = request.favorite { set_clauses.push("favorite=?".to_string()); params_vec.push(Box::new(v as i32)); }
+
+        if !set_clauses.is_empty() {
+            set_clauses.push("updated_at=?".to_string());
+            params_vec.push(Box::new(now.clone()));
+            params_vec.push(Box::new(id.clone())); // WHERE id=?
+
+            let sql = format!("UPDATE clients SET {} WHERE id=?", set_clauses.join(", "));
+            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+            db.execute(&sql, params_refs.as_slice())
+                .map_err(|e| format!("Failed to update client: {}", e))?;
+        }
+
         let sql = format!("SELECT {} FROM clients WHERE id=?1", COLS);
         db.query_row(&sql, params![id], row_to_client).map_err(|e| e.to_string())
     })
@@ -441,32 +471,72 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
     let bundle: std::collections::HashMap<String, String> = serde_json::from_str(&content)
         .map_err(|e| format!("Invalid backup format: {}", e))?;
 
-    let username = bundle.get("username").ok_or("Missing username in backup")?;
+    let username = bundle.get("username").ok_or("Missing username in backup")?.clone();
     let vault_hex = bundle.get("vault").ok_or("Missing vault data")?;
     let db_hex = bundle.get("database").ok_or("Missing database")?;
 
     let vault_bytes = hex::decode(vault_hex).map_err(|e| format!("Corrupt vault data: {}", e))?;
     let db_bytes = hex::decode(db_hex).map_err(|e| format!("Corrupt database: {}", e))?;
 
-    // Write files
-    let vault_path = state.vault_manager.vault_path_public(username);
-    let db_path = state.vault_manager.db_path(username);
+    let vault_path = state.vault_manager.vault_path_public(&username);
+    let db_path = state.vault_manager.db_path(&username);
 
+    // Backup existing files if they exist (so we can restore on failure)
+    let vault_backup = vault_path.with_extension("enc.bak");
+    let db_backup = db_path.with_extension("db.bak");
+    let had_existing_vault = vault_path.exists();
+    let had_existing_db = db_path.exists();
+
+    if had_existing_vault {
+        std::fs::copy(&vault_path, &vault_backup)
+            .map_err(|e| format!("Failed to backup existing vault: {}", e))?;
+    }
+    if had_existing_db {
+        std::fs::copy(&db_path, &db_backup)
+            .map_err(|e| format!("Failed to backup existing database: {}", e))?;
+    }
+
+    // Register user in manifest first (so unlock can find them)
+    let user_existed = state.vault_manager.load_users().iter().any(|u| u.username == username);
+    if !user_existed {
+        state.vault_manager.register_imported_user(&username, &master_password)?;
+    }
+
+    // Write imported files
     std::fs::write(&vault_path, &vault_bytes).map_err(|e| format!("Write failed: {}", e))?;
     std::fs::write(&db_path, &db_bytes).map_err(|e| format!("Write failed: {}", e))?;
 
-    // Verify master password works
-    if state.vault_manager.unlock(username, &master_password).is_err() {
-        std::fs::remove_file(&vault_path).ok();
-        std::fs::remove_file(&db_path).ok();
+    // Verify master password works with the imported vault
+    if state.vault_manager.unlock(&username, &master_password).is_err() {
+        // Restore original files on failure
+        if had_existing_vault {
+            std::fs::copy(&vault_backup, &vault_path).ok();
+        } else {
+            std::fs::remove_file(&vault_path).ok();
+        }
+        if had_existing_db {
+            std::fs::copy(&db_backup, &db_path).ok();
+        } else {
+            std::fs::remove_file(&db_path).ok();
+        }
+        // Remove user from manifest if we just added them
+        if !user_existed {
+            let mut users = state.vault_manager.load_users();
+            users.retain(|u| u.username != username);
+            let _ = state.vault_manager.save_users_public(&users);
+        }
+        // Cleanup backups
+        std::fs::remove_file(&vault_backup).ok();
+        std::fs::remove_file(&db_backup).ok();
         return Err("Wrong master password for this backup. Import cancelled.".to_string());
     }
 
-    // Register user if not already in manifest
-    state.vault_manager.register_imported_user(username, &master_password)?;
+    // Success - remove backups
+    std::fs::remove_file(&vault_backup).ok();
+    std::fs::remove_file(&db_backup).ok();
 
     let users = state.vault_manager.load_users();
-    let user = users.iter().find(|u| u.username == *username).ok_or("Import failed")?;
+    let user = users.iter().find(|u| u.username == username).ok_or("Import failed")?;
     Ok(UserInfo { username: user.username.clone(), display_name: user.display_name.clone(), created_at: user.created_at.clone() })
 }
 
@@ -476,29 +546,44 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
 // ============================================================
 
 #[tauri::command]
-fn run_login(state: State<AppState>, url: String, email: String, password: String, client_id: String) -> Result<LoginResponse, String> {
+fn run_login(_state: State<AppState>, url: String, email: String, password: String, client_id: String) -> Result<LoginResponse, String> {
     use std::process::Command;
     use std::io::Write;
 
+    // Cross-OS: get npm global root and normalize path separators for JS
     let npm_root = Command::new("npm").args(["root", "-g"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "/usr/lib/node_modules".to_string());
+        .unwrap_or_else(|_| {
+            #[cfg(target_os = "windows")]
+            { format!("{}\\node_modules", std::env::var("APPDATA").unwrap_or_default()) }
+            #[cfg(target_os = "macos")]
+            { "/usr/local/lib/node_modules".to_string() }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            { "/usr/lib/node_modules".to_string() }
+        });
 
+    // Normalize backslashes to forward slashes for JS require() compatibility
+    let npm_root_js = npm_root.replace('\\', "/");
+
+    // Script reads credentials from environment variables (never written to disk)
     let script = format!(r#"
 const {{ chromium }} = require('{npm_root}/playwright');
 (async () => {{
+  const url = process.env.AWSLH_URL;
+  const email = process.env.AWSLH_EMAIL;
+  const password = process.env.AWSLH_PASSWORD;
   let browser;
   try {{
     browser = await chromium.launch({{ headless: false, args: ['--start-maximized'] }});
     const context = await browser.newContext({{ viewport: null }});
     const page = await context.newPage();
     console.log('[STEP] NAVIGATING');
-    await page.goto({url}, {{ waitUntil: 'networkidle', timeout: 30000 }});
+    await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
     await page.waitForTimeout(2000);
     console.log('[STEP] FILLING_EMAIL');
     const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
     let emailFilled = false;
-    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill({email}); emailFilled = true; break; }} }} catch {{}} }}
+    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill(email); emailFilled = true; break; }} }} catch {{}} }}
     if (!emailFilled) {{ console.log('[STEP] FAILED:Could not find email field'); process.exit(1); }}
     console.log('[STEP] SUBMITTING_EMAIL');
     const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
@@ -507,7 +592,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
     console.log('[STEP] FILLING_PASSWORD');
     const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
     let pwFilled = false;
-    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill({password}); pwFilled = true; break; }} }} catch {{}} }}
+    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill(password); pwFilled = true; break; }} }} catch {{}} }}
     if (!pwFilled) {{ console.log('[STEP] FAILED:Could not find password field'); process.exit(1); }}
     console.log('[STEP] SUBMITTING_PASSWORD');
     for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
@@ -520,7 +605,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
     }}
   }} catch (error) {{ console.log('[STEP] FAILED:' + error.message); if (browser) await browser.close(); process.exit(1); }}
 }})();
-"#, npm_root=npm_root, url=serde_json::to_string(&url).unwrap_or_default(), email=serde_json::to_string(&email).unwrap_or_default(), password=serde_json::to_string(&password).unwrap_or_default());
+"#, npm_root=npm_root_js);
 
     let tmp_dir = std::env::temp_dir();
     let script_path = tmp_dir.join(format!("awslh-{}.js", client_id));
@@ -528,17 +613,34 @@ const {{ chromium }} = require('{npm_root}/playwright');
     file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
     drop(file);
 
-    let output = Command::new("node").arg(&script_path).output().map_err(|e| format!("Node.js error: {}", e))?;
-    let _ = std::fs::remove_file(&script_path); // Cleanup immediately
+    // Pass credentials via environment variables (never on disk)
+    let child = Command::new("node")
+        .arg(&script_path)
+        .env("AWSLH_URL", &url)
+        .env("AWSLH_EMAIL", &email)
+        .env("AWSLH_PASSWORD", &password)
+        .spawn();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    if stdout.contains("[STEP] COMPLETED") {
-        Ok(LoginResponse { success: true, message: "Login completed".to_string(), step: "completed".to_string() })
-    } else {
-        let msg = stdout.lines().filter(|l| l.contains("FAILED")).last()
-            .map(|l| l.replace("[STEP] FAILED:", "").trim().to_string())
-            .unwrap_or_else(|| "Login failed".to_string());
-        Ok(LoginResponse { success: false, message: msg, step: "failed".to_string() })
+    match child {
+        Ok(proc) => {
+            // Wait for process to complete
+            let output = proc.wait_with_output().map_err(|e| format!("Node.js error: {}", e))?;
+            let _ = std::fs::remove_file(&script_path); // Cleanup
+
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            if stdout.contains("[STEP] COMPLETED") {
+                Ok(LoginResponse { success: true, message: "Login completed".to_string(), step: "completed".to_string() })
+            } else {
+                let msg = stdout.lines().filter(|l| l.contains("FAILED")).last()
+                    .map(|l| l.replace("[STEP] FAILED:", "").trim().to_string())
+                    .unwrap_or_else(|| "Login failed".to_string());
+                Ok(LoginResponse { success: false, message: msg, step: "failed".to_string() })
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&script_path);
+            Err(format!("Failed to start Node.js: {}. Ensure Node.js and Playwright are installed.", e))
+        }
     }
 }
 
@@ -585,8 +687,7 @@ fn generate_aws_config(state: State<AppState>) -> Result<String, String> {
     }
 
     // Write to ~/.aws/config (system-wide, accessible from any terminal)
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
-    let aws_dir = std::path::PathBuf::from(&home).join(".aws");
+    let aws_dir = home_dir().join(".aws");
     std::fs::create_dir_all(&aws_dir).ok();
     let config_path = aws_dir.join("config");
 
@@ -600,11 +701,23 @@ fn generate_aws_config(state: State<AppState>) -> Result<String, String> {
         if let Some(start_idx) = existing.find(marker_start) {
             let before = &existing[..start_idx];
             let after = if let Some(end_idx) = existing.find(marker_end) {
-                &existing[end_idx + marker_end.len()..]
+                existing[end_idx + marker_end.len()..].trim_start_matches('\n')
             } else {
                 ""
             };
-            format!("{}{}{}\n", before.trim_end(), if before.trim().is_empty() { "" } else { "\n\n" }, config.trim_end())
+            let before_part = before.trim_end();
+            let after_part = after.trim();
+            let mut result = String::new();
+            if !before_part.is_empty() {
+                result.push_str(before_part);
+                result.push_str("\n\n");
+            }
+            result.push_str(config.trim_end());
+            if !after_part.is_empty() {
+                result.push_str("\n\n");
+                result.push_str(after_part);
+            }
+            result
         } else {
             format!("{}\n\n{}", existing.trim_end(), config)
         }
@@ -660,12 +773,11 @@ struct SsoRefreshResult {
 /// After you authenticate (MFA included), the token is cached at ~/.aws/sso/cache/
 /// and available system-wide for all terminals.
 #[tauri::command]
-fn refresh_sso_token(state: State<AppState>, profile: String) -> Result<SsoRefreshResult, String> {
+fn refresh_sso_token(_state: State<AppState>, profile: String) -> Result<SsoRefreshResult, String> {
     use std::process::Command;
 
     // First check if the profile exists in ~/.aws/config with required fields
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let config_path = std::path::PathBuf::from(&home).join(".aws").join("config");
+    let config_path = home_dir().join(".aws").join("config");
     let config_content = std::fs::read_to_string(&config_path).unwrap_or_default();
 
     if !config_content.contains(&format!("[profile {}]", profile)) {
@@ -689,6 +801,21 @@ fn refresh_sso_token(state: State<AppState>, profile: String) -> Result<SsoRefre
     }
 
     // Run aws sso login — this opens the default browser for authentication
+    // Kill any previous orphaned sso login processes for this profile
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("pkill")
+            .args(["-f", &format!("aws sso login --profile {}", profile)])
+            .output()
+            .ok();
+    }
+
+    #[cfg(target_os = "windows")]
+    let child = Command::new("cmd")
+        .args(["/C", "aws", "sso", "login", "--profile", &profile])
+        .spawn();
+
+    #[cfg(not(target_os = "windows"))]
     let child = Command::new("aws")
         .args(["sso", "login", "--profile", &profile])
         .spawn();
@@ -698,7 +825,7 @@ fn refresh_sso_token(state: State<AppState>, profile: String) -> Result<SsoRefre
             Ok(SsoRefreshResult {
                 profile: profile.clone(),
                 success: true,
-                message: format!("Browser opened for SSO authentication.\n\nComplete login in your browser. Once done, the token is cached and you can use:\n  aws --profile {} s3 ls\n  aws --profile {} sts get-caller-identity\n\nfrom any terminal.", profile, profile),
+                message: format!("⚠️  ACTION REQUIRED: Complete login in your browser!\n\nA browser tab has been opened to the AWS SSO device authorization page.\n\n1. Switch to your browser\n2. Enter the device code shown\n3. Complete MFA if prompted\n4. Click 'Approve'\n\nOnce done, the token is cached and you can use:\n  aws --profile {} s3 ls\n  aws --profile {} sts get-caller-identity\n\nfrom any terminal.", profile, profile),
             })
         }
         Err(e) => {
@@ -826,9 +953,8 @@ fn check_password_expiry(state: State<AppState>) -> Result<bool, String> {
     let vault = vault_lock.as_ref().ok_or("Vault is locked")?;
 
     // Check when vault was last unlocked — stored in a marker file
-    let marker_path = std::path::PathBuf::from(
-        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-    ).join(".aws-login-hub").join(format!("{}.last_auth", vault.username));
+    let marker_path = home_dir()
+        .join(".aws-login-hub").join(format!("{}.last_auth", vault.username));
 
     if let Ok(content) = std::fs::read_to_string(&marker_path) {
         if let Ok(last_auth) = chrono::DateTime::parse_from_rfc3339(content.trim()) {
@@ -846,24 +972,57 @@ fn refresh_password_expiry(state: State<AppState>) -> Result<(), String> {
     let vault_lock = state.active_vault.lock().map_err(|e| e.to_string())?;
     let vault = vault_lock.as_ref().ok_or("Vault is locked")?;
 
-    let marker_path = std::path::PathBuf::from(
-        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-    ).join(".aws-login-hub").join(format!("{}.last_auth", vault.username));
+    let marker_path = home_dir()
+        .join(".aws-login-hub").join(format!("{}.last_auth", vault.username));
 
     std::fs::write(&marker_path, Utc::now().to_rfc3339())
         .map_err(|e| format!("Failed to write auth marker: {}", e))
 }
 
 // ============================================================
-// Terminal - Run AWS CLI commands
+// Terminal - Run AWS CLI commands (restricted + cross-OS)
 // ============================================================
+
+/// Allowed command prefixes for security
+const ALLOWED_COMMANDS: &[&str] = &[
+    "aws ", "aws.exe ",
+    "kubectl ", "terraform ", "sam ",
+    "echo ", "cat ", "ls ", "dir ", "whoami", "hostname",
+    "python ", "python3 ", "node ",
+];
 
 #[tauri::command]
 fn run_terminal_command(command: String, profile: String) -> Result<String, String> {
     use std::process::Command;
 
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c").arg(&command);
+    let trimmed = command.trim().to_lowercase();
+
+    // Security: only allow safe commands
+    let allowed = ALLOWED_COMMANDS.iter().any(|prefix| trimmed.starts_with(prefix))
+        || trimmed == "whoami"
+        || trimmed == "hostname";
+
+    if !allowed {
+        return Err(format!(
+            "Command not allowed. Only AWS CLI and related tools are permitted.\nAllowed: aws, kubectl, terraform, sam, echo, cat, ls, dir, whoami, hostname, python, node"
+        ));
+    }
+
+    // Cross-OS shell execution
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", &command]);
+        c
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let mut c = Command::new(shell);
+        c.arg("-c").arg(&command);
+        c
+    };
 
     if !profile.is_empty() {
         cmd.env("AWS_PROFILE", &profile);

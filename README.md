@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.2.1-blue?style=flat-square" />
+  <img src="https://img.shields.io/badge/version-1.6.0-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" />
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?style=flat-square" />
   <img src="https://img.shields.io/github/downloads/Gourav-Singh-Comprinno/aws-login-hub/total?style=flat-square&label=downloads" />
@@ -53,14 +53,14 @@ Go to the [Releases page](https://github.com/Gourav-Singh-Comprinno/aws-login-hu
 
 ### Windows
 
-1. Download `aws-login-hub_x64.msi`
-2. Double-click the `.msi` file
+1. Download `aws-login-hub_1.6.0_x64-setup.exe` or `.msi`
+2. Double-click to install
 3. Follow the installer
 4. Find "AWS Login Hub" in your Start Menu
 
 ### macOS
 
-1. Download `aws-login-hub_x64.dmg` (Intel) or `aws-login-hub_aarch64.dmg` (Apple Silicon)
+1. Download `aws-login-hub_1.6.0_aarch64.dmg` (Apple Silicon) or `aws-login-hub_1.6.0_x64.dmg` (Intel)
 2. Open the `.dmg` file
 3. Drag "AWS Login Hub" to Applications
 4. Open from Launchpad or Spotlight (`Cmd + Space` → "AWS Login Hub")
@@ -68,9 +68,8 @@ Go to the [Releases page](https://github.com/Gourav-Singh-Comprinno/aws-login-hu
 ### Linux (Ubuntu / Debian)
 
 ```bash
-# Download from releases page or:
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub_1.2.1_amd64.deb
-sudo dpkg -i aws-login-hub_1.2.1_amd64.deb
+wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub_1.6.0_amd64.deb
+sudo dpkg -i aws-login-hub_1.6.0_amd64.deb
 ```
 
 Find "AWS Login Hub" in your application menu, or run:
@@ -81,17 +80,17 @@ aws-login-hub
 ### Linux (Fedora / RHEL)
 
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub-1.2.1-1.x86_64.rpm
-sudo rpm -i aws-login-hub-1.2.1-1.x86_64.rpm
+wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub-1.6.0-1.x86_64.rpm
+sudo rpm -i aws-login-hub-1.6.0-1.x86_64.rpm
 aws-login-hub
 ```
 
 ### Linux (Portable — Any Distro)
 
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub_1.2.1_amd64.AppImage
-chmod +x aws-login-hub_1.2.1_amd64.AppImage
-./aws-login-hub_1.2.1_amd64.AppImage
+wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/aws-login-hub_1.6.0_amd64.AppImage
+chmod +x aws-login-hub_1.6.0_amd64.AppImage
+./aws-login-hub_1.6.0_amd64.AppImage
 ```
 
 ### After Install: Setup Browser Automation
@@ -101,7 +100,7 @@ npm install -g playwright
 npx playwright install chromium
 ```
 
-This enables the auto-login feature. Without it, credential storage still works.
+This enables the auto-login feature. Without it, credential storage and AWS profiles still work.
 
 ---
 
@@ -110,7 +109,7 @@ This enables the auto-login feature. Without it, credential storage still works.
 ### Encrypted Vault
 - AES-256-GCM encryption with Argon2id key derivation
 - Passwords never stored in plaintext anywhere
-- Vault auto-locks after 15 minutes
+- Vault auto-locks after 15 minutes of inactivity
 - Master password re-verification every 2 weeks
 
 ### Multi-User Isolation
@@ -123,6 +122,7 @@ This enables the auto-login feature. Without it, credential storage still works.
 - Pauses at MFA — you complete it manually
 - AWS Console opens → session timestamp updated
 - "Refresh All Tokens" button refreshes all clients at once
+- Credentials passed via environment variables (never written to disk)
 
 ### System-Wide AWS Profiles
 - Generates `~/.aws/config` with SSO profiles for all your clients
@@ -134,11 +134,13 @@ This enables the auto-login feature. Without it, credential storage still works.
 - Run AWS CLI commands directly from the app
 - Auto-sets `AWS_PROFILE` for the selected client
 - "Get Credentials" exports temporary access keys you can paste anywhere
+- Command allowlist for security (aws, kubectl, terraform, sam)
 
 ### Export / Import
 - Export your encrypted vault to transfer between machines
 - Import on any OS (Windows, macOS, Linux)
 - Backup file is encrypted — safe to store on USB or cloud
+- Safe import with rollback on failure
 
 ---
 
@@ -166,16 +168,19 @@ Any IDE:      VS Code AWS Toolkit reads the profiles
 ### Token Refresh
 
 ```
-Click "Refresh All Tokens"
+Click "Refresh Token"
         |
         v
-Browser automation logs into each client's SSO
+aws sso login --profile <name> runs in background
         |
         v
-Tokens cached at ~/.aws/sso/cache/ (system-wide)
+Browser opens → complete device authorization + MFA
         |
         v
-All terminals can use profiles without re-authenticating
+Token cached at ~/.aws/sso/cache/ (system-wide)
+        |
+        v
+All terminals can use the profile without re-authenticating
 ```
 
 ---
@@ -190,6 +195,9 @@ All terminals can use profiles without re-authenticating
 | Memory | Keys zeroed from RAM on vault lock (zeroize crate) |
 | User isolation | Each user has independent encrypted vault file |
 | Network | Zero network calls. All data is local. |
+| CSP | Content Security Policy enabled (script injection protection) |
+| Terminal | Command allowlist — only AWS CLI and related tools permitted |
+| Credentials | Login credentials passed via env vars, never written to disk |
 | Expiration | Re-authentication required every 2 weeks |
 | MFA | Never bypassed or automated |
 
@@ -206,6 +214,55 @@ All terminals can use profiles without re-authenticating
 ```
 
 The `.vault.enc` file is a binary encrypted blob. Without the master password, it cannot be read.
+
+---
+
+## Changelog
+
+### v1.6.0 (2026-07-18)
+
+**Security Fixes:**
+- Enabled Content Security Policy (CSP) — prevents XSS/script injection
+- Terminal restricted to allowlisted commands (aws, kubectl, terraform, sam, etc.)
+- Login credentials now passed via environment variables instead of temp files
+- Import vault uses backup/rollback to prevent data loss
+
+**Cross-OS Fixes (Windows + macOS + Linux):**
+- Terminal uses `cmd /C` on Windows, `$SHELL -c` on Unix (was hardcoded to `bash`)
+- Consistent `home_dir()` helper for all path resolution
+- Playwright path detection with platform-specific fallbacks
+- Windows backslash normalization for Node.js require paths
+- SSO token refresh uses platform-aware process spawning
+
+**Bug Fixes:**
+- **Fixed:** Edit form now correctly saves SSO Region, Account ID, and Role Name
+- **Fixed:** Single atomic UPDATE statement (no more silent partial updates)
+- **Fixed:** Import vault works for new users (register in manifest before unlock)
+- **Fixed:** Auto-lock timer no longer causes performance issues (uses ref instead of state)
+- **Fixed:** Password expiry no longer locks you out after successful authentication
+- **Fixed:** Refresh Token kills orphaned processes before spawning new one
+
+**Improvements:**
+- Removed unused npm dependencies (plugin-sql, plugin-store)
+- Clearer "ACTION REQUIRED" message when browser authorization needed
+- Better error reporting on update failures
+
+### v1.5.0 (2026-07-18)
+- SSO profile generation with account_id + role_name fields
+- `aws sso login` integration for CLI token refresh
+- Built-in terminal with AWS_PROFILE auto-configuration
+
+### v1.4.0 (2026-07-18)
+- Terminal page with profile selection and credential export
+- Sync Profiles button generates ~/.aws/config
+
+### v1.3.0 (2026-07-18)
+- Dashboard with activity stats
+- Favorites and Recent pages
+- Search across clients
+
+### v1.2.1 (2026-07-18)
+- Initial release with vault encryption, browser automation, multi-user support
 
 ---
 

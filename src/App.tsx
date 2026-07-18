@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { LayoutDashboard, Users, Star, Clock, Settings, Shield, Lock, Zap, Terminal as TermIcon } from "lucide-react";
 import type { Page } from "./types";
@@ -14,17 +14,23 @@ function App() {
   const [unlocked, setUnlocked] = useState(false);
   const [currentUser, setCurrentUser] = useState<UserInfo | null>(null);
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
-  const [lastActivity, setLastActivity] = useState(Date.now());
+  const lastActivityRef = useRef(Date.now());
 
   useEffect(() => {
     const checkIdle = setInterval(() => {
-      if (unlocked && Date.now() - lastActivity > 15 * 60 * 1000) handleLock();
+      if (unlocked && Date.now() - lastActivityRef.current > 15 * 60 * 1000) {
+        api.lockVault().then(() => {
+          setUnlocked(false);
+          setCurrentUser(null);
+          setCurrentPage("dashboard");
+        });
+      }
     }, 30000);
     return () => clearInterval(checkIdle);
-  }, [unlocked, lastActivity]);
+  }, [unlocked]);
 
   useEffect(() => {
-    const reset = () => setLastActivity(Date.now());
+    const reset = () => { lastActivityRef.current = Date.now(); };
     window.addEventListener("mousemove", reset);
     window.addEventListener("keydown", reset);
     return () => { window.removeEventListener("mousemove", reset); window.removeEventListener("keydown", reset); };
@@ -33,7 +39,7 @@ function App() {
   const handleUnlock = async (user: UserInfo) => {
     setCurrentUser(user);
     setUnlocked(true);
-    setLastActivity(Date.now());
+    lastActivityRef.current = Date.now();
     // Refresh password expiry marker
     api.refreshPasswordExpiry().catch(() => {});
   };
@@ -151,13 +157,11 @@ function UnlockScreen({ onUnlock }: { onUnlock: (user: UserInfo) => void }) {
     setError(""); setLoading(true);
     try {
       const user = await api.unlockVault(selectedUser, password);
-      // Check if password has expired (2 weeks)
+      // Check if password has expired (2 weeks) — still allow access but refresh the marker
       const expired = await api.checkPasswordExpiry().catch(() => false);
       if (expired) {
-        await api.lockVault();
-        setError("Your session has expired (2 weeks). Please re-enter your master password to continue.");
-        setLoading(false);
-        return;
+        // Password re-verified successfully during unlock — just refresh the marker
+        await api.refreshPasswordExpiry().catch(() => {});
       }
       await api.refreshPasswordExpiry().catch(() => {});
       setPassword(""); onUnlock(user);
