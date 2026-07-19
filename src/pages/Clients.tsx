@@ -35,7 +35,7 @@ export default function Clients() {
     setLoginProgress({ id: client.id, message: "Opening browser..." });
     try {
       const password = await api.getClientPassword(client.id);
-      await api.runLogin(client.identity_center_url, client.email, password, client.id);
+      await api.runLogin(client.identity_center_url, client.email, password, client.id, client.name);
       setLoginProgress({ id: client.id, message: "Browser opened ✓" });
       await api.updateLastLogin(client.id);
       setTimeout(() => setLoginProgress(null), 3000);
