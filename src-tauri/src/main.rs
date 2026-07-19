@@ -700,15 +700,13 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
             .args(["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
             .output()
             .ok()
-            .and_then(|o| Some(String::from_utf8_lossy(&o.stdout).to_string()));
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         
         if let Some(ref handlers) = output {
-            if handlers.contains("com.google.chrome") {
+            if handlers.contains("com.google.chrome") || handlers.contains("com.brave.browser") {
                 "chrome"
             } else if handlers.contains("com.microsoft.edgemac") {
                 "msedge"
-            } else if handlers.contains("com.brave.browser") {
-                "chrome"
             } else {
                 "chrome"
             }
@@ -957,7 +955,7 @@ fn generate_aws_config(state: State<AppState>) -> Result<String, String> {
         config.push_str("sso_registration_scopes = sso:account:access\n");
         config.push_str(&format!("region = {}\n", if client.sso_region.is_empty() { "us-east-1" } else { &client.sso_region }));
         config.push_str("output = json\n");
-        config.push_str("\n");
+        config.push('\n');
         generated += 1;
     }
 
@@ -1070,7 +1068,7 @@ fn refresh_sso_token(_state: State<AppState>, profile: String) -> Result<SsoRefr
         });
     }
 
-    if config_content.contains(&format!("# SKIPPED: ")) {
+    if config_content.contains("# SKIPPED: ") {
         // Check if this specific profile was skipped
         let profile_section = format!("[profile {}]", profile);
         if !config_content.contains(&profile_section) {
@@ -1300,9 +1298,9 @@ fn run_terminal_command(command: String, profile: String) -> Result<String, Stri
         || trimmed_lower == "hostname";
 
     if !allowed {
-        return Err(format!(
-            "Command not allowed. Only AWS CLI and related tools are permitted.\nAllowed: aws, kubectl, terraform, sam, echo, cat, ls, dir, whoami, hostname, python, node"
-        ));
+        return Err(
+            "Command not allowed. Only AWS CLI and related tools are permitted.\nAllowed: aws, kubectl, terraform, sam, echo, cat, ls, dir, whoami, hostname, python, node".to_string()
+        );
     }
 
     // Execute command directly without a shell to prevent injection
