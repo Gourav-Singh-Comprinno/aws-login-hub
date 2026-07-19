@@ -600,31 +600,99 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
 // Login Automation
 // ============================================================
 
+/// Find a binary by checking common paths (needed because GUI apps don't inherit shell PATH)
+fn find_binary(name: &str) -> Option<String> {
+    use std::process::Command;
+
+    // First try the binary directly (works if PATH is set)
+    if let Ok(output) = Command::new(name).arg("--version").output() {
+        if output.status.success() {
+            return Some(name.to_string());
+        }
+    }
+
+    // Check common installation paths
+    let common_paths = [
+        format!("/usr/local/bin/{}", name),
+        format!("/opt/homebrew/bin/{}", name),
+        format!("/usr/bin/{}", name),
+        format!("/opt/local/bin/{}", name),
+        format!("{}/.nvm/versions/node/current/bin/{}", std::env::var("HOME").unwrap_or_default(), name),
+    ];
+
+    #[cfg(target_os = "windows")]
+    let common_paths_win = [
+        format!("C:\\Program Files\\nodejs\\{}.exe", name),
+        format!("{}\\AppData\\Roaming\\npm\\{}.cmd", std::env::var("USERPROFILE").unwrap_or_default(), name),
+    ];
+
+    for path in &common_paths {
+        if std::path::Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    for path in &common_paths_win {
+        if std::path::Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    // Try using `which` / `where` as last resort
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = Command::new("where").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("").trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Ensures Node.js and Playwright are installed. Installs Playwright automatically if missing.
 fn ensure_playwright() -> Result<(), String> {
     use std::process::Command;
 
     // Check if Node.js is available
-    let node_check = Command::new("node").arg("--version").output();
-    if node_check.is_err() || !node_check.unwrap().status.success() {
+    let node_bin = find_binary("node");
+    if node_bin.is_none() {
         return Err("Node.js is not installed. Please install Node.js from https://nodejs.org".to_string());
     }
 
     // Check if npm is available
-    let npm_check = Command::new("npm").arg("--version").output();
-    if npm_check.is_err() || !npm_check.unwrap().status.success() {
+    let npm_bin = find_binary("npm");
+    if npm_bin.is_none() {
         return Err("npm is not installed. Please install Node.js from https://nodejs.org".to_string());
     }
+    let npm = npm_bin.unwrap();
 
     // Check if Playwright is installed globally
-    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+    let npm_root = Command::new(&npm).args(["root", "-g"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
     let playwright_path = std::path::PathBuf::from(&npm_root).join("playwright");
     if !playwright_path.exists() {
         // Auto-install Playwright globally
-        let install = Command::new("npm")
+        let install = Command::new(&npm)
             .args(["install", "-g", "playwright"])
             .output()
             .map_err(|e| format!("Failed to install Playwright: {}", e))?;
@@ -636,7 +704,6 @@ fn ensure_playwright() -> Result<(), String> {
     }
 
     // Check if Chromium browser is downloaded for Playwright
-    // Playwright stores browsers in a known cache directory
     let cache_dir = {
         #[cfg(target_os = "macos")]
         { home_dir().join("Library/Caches/ms-playwright") }
@@ -658,8 +725,8 @@ fn ensure_playwright() -> Result<(), String> {
         .unwrap_or(false);
 
     if !has_chromium {
-        // Auto-install Chromium for Playwright
-        let install = Command::new("npx")
+        let npx_bin = find_binary("npx").unwrap_or_else(|| "npx".to_string());
+        let install = Command::new(&npx_bin)
             .args(["playwright", "install", "chromium"])
             .output()
             .map_err(|e| format!("Failed to install Chromium: {}", e))?;
@@ -679,8 +746,14 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
 
     let _ = &client_id;
 
+    // Find node and npm binaries (GUI apps don't have shell PATH)
+    let node_bin = find_binary("node")
+        .ok_or("Node.js not found. Please install Node.js from https://nodejs.org")?;
+    let npm_bin = find_binary("npm")
+        .ok_or("npm not found. Please install Node.js from https://nodejs.org")?;
+
     // Cross-OS: get npm global root
-    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+    let npm_root = Command::new(&npm_bin).args(["root", "-g"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| {
             #[cfg(target_os = "windows")]
@@ -695,29 +768,37 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
 
     // Detect system default browser and map to Playwright channel
     #[cfg(target_os = "macos")]
-    let default_channel = {
+    let (default_channel, default_exec_path): (&str, &str) = {
         let output = Command::new("defaults")
             .args(["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
             .output()
             .ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
         
+        let brave_path = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
+        let brave_exists = std::path::Path::new(brave_path).exists();
+
         if let Some(ref handlers) = output {
-            if handlers.contains("com.google.chrome") || handlers.contains("com.brave.browser") {
-                "chrome"
+            if handlers.contains("com.brave.browser") && brave_exists {
+                ("", brave_path)
+            } else if handlers.contains("com.google.chrome") {
+                ("chrome", "")
             } else if handlers.contains("com.microsoft.edgemac") {
-                "msedge"
+                ("msedge", "")
+            } else if brave_exists {
+                ("", brave_path)
             } else {
-                "chrome"
+                ("chrome", "")
             }
+        } else if brave_exists {
+            ("", brave_path)
         } else {
-            "chrome"
+            ("chrome", "")
         }
     };
 
     #[cfg(target_os = "windows")]
-    let default_channel = {
-        // Query Windows registry for default HTTP handler
+    let (default_channel, default_exec_path): (&str, &str) = {
         let output = Command::new("reg")
             .args(["query", r"HKEY_CURRENT_USER\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice", "/v", "ProgId"])
             .output()
@@ -725,27 +806,24 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
 
-        if output.contains("ChromeHTML") || output.contains("Google") {
-            "chrome"
+        if output.contains("BraveHTML") || output.contains("Brave") {
+            let brave_path = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe";
+            if std::path::Path::new(brave_path).exists() {
+                ("", brave_path)
+            } else {
+                ("chrome", "")
+            }
+        } else if output.contains("ChromeHTML") || output.contains("Google") {
+            ("chrome", "")
         } else if output.contains("MSEdgeHTM") || output.contains("Edge") {
-            "msedge"
-        } else if output.contains("BraveHTML") || output.contains("Brave") {
-            "chrome"
+            ("msedge", "")
         } else {
-            // Fallback: check which browser exe exists
-            let chrome_exists = std::path::Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe").exists()
-                || std::path::Path::new(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe").exists();
-            let edge_exists = std::path::Path::new(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe").exists();
-
-            if chrome_exists { "chrome" }
-            else if edge_exists { "msedge" }
-            else { "chrome" }
+            ("chrome", "")
         }
     };
 
     #[cfg(target_os = "linux")]
-    let default_channel = {
-        // Query xdg-settings for default browser
+    let (default_channel, default_exec_path): (&str, &str) = {
         let output = Command::new("xdg-settings")
             .args(["get", "default-web-browser"])
             .output()
@@ -753,29 +831,22 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_default();
 
-        if output.contains("google-chrome") || output.contains("chrome") {
-            "chrome"
+        if output.contains("brave") {
+            if std::path::Path::new("/usr/bin/brave-browser").exists() {
+                ("", "/usr/bin/brave-browser")
+            } else if std::path::Path::new("/usr/bin/brave").exists() {
+                ("", "/usr/bin/brave")
+            } else {
+                ("chrome", "")
+            }
+        } else if output.contains("google-chrome") || output.contains("chrome") {
+            ("chrome", "")
         } else if output.contains("microsoft-edge") || output.contains("msedge") {
-            "msedge"
-        } else if output.contains("brave") {
-            "chrome"
+            ("msedge", "")
         } else if output.contains("chromium") {
-            "chromium"
+            ("chromium", "")
         } else {
-            // Fallback: check which browser binary exists in PATH
-            let chrome_exists = Command::new("which").arg("google-chrome").output()
-                .map(|o| o.status.success()).unwrap_or(false);
-            let chromium_exists = Command::new("which").arg("chromium-browser").output()
-                .map(|o| o.status.success()).unwrap_or(false)
-                || Command::new("which").arg("chromium").output()
-                .map(|o| o.status.success()).unwrap_or(false);
-            let edge_exists = Command::new("which").arg("microsoft-edge").output()
-                .map(|o| o.status.success()).unwrap_or(false);
-
-            if chrome_exists { "chrome" }
-            else if edge_exists { "msedge" }
-            else if chromium_exists { "chromium" }
-            else { "chrome" }
+            ("chrome", "")
         }
     };
 
@@ -786,27 +857,43 @@ const {{ chromium }} = require('{npm_root}/playwright');
   const url = process.env.AWSLH_URL;
   const email = process.env.AWSLH_EMAIL;
   const password = process.env.AWSLH_PASSWORD;
-  const channel = process.env.AWSLH_CHANNEL || 'chrome';
+  const channel = process.env.AWSLH_CHANNEL || '';
+  const execPath = process.env.AWSLH_EXEC_PATH || '';
 
-  const channels = [channel, 'chrome', 'msedge', 'chromium'];
   let browser;
 
-  // Try each browser channel until one works
-  for (const ch of channels) {{
+  // First try with explicit executable path (for Brave, etc.)
+  if (execPath) {{
     try {{
       browser = await chromium.launch({{
         headless: false,
-        channel: ch,
+        executablePath: execPath,
         args: ['--start-maximized']
       }});
-      break;
     }} catch (e) {{
-      continue;
+      // Fall through to channel-based detection
+    }}
+  }}
+
+  // Try channel-based launch
+  if (!browser) {{
+    const channels = [channel, 'chrome', 'msedge', 'chromium'].filter(Boolean);
+    for (const ch of channels) {{
+      try {{
+        browser = await chromium.launch({{
+          headless: false,
+          channel: ch,
+          args: ['--start-maximized']
+        }});
+        break;
+      }} catch (e) {{
+        continue;
+      }}
     }}
   }}
 
   if (!browser) {{
-    console.error('No supported browser found (Chrome, Edge, or Chromium required)');
+    console.error('No supported browser found (Brave, Chrome, Edge, or Chromium required)');
     process.exit(1);
   }}
 
@@ -888,12 +975,13 @@ const {{ chromium }} = require('{npm_root}/playwright');
     }
 
     // Spawn in background — don't block the app
-    let child = Command::new("node")
+    let child = Command::new(&node_bin)
         .arg(&script_path)
         .env("AWSLH_URL", &url)
         .env("AWSLH_EMAIL", &email)
         .env("AWSLH_PASSWORD", &password)
         .env("AWSLH_CHANNEL", default_channel)
+        .env("AWSLH_EXEC_PATH", default_exec_path)
         .spawn();
 
     match child {
