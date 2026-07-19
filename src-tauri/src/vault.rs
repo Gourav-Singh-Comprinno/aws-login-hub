@@ -210,7 +210,7 @@ impl VaultManager {
         Ok(())
     }
 
-    /// Register a user from an imported vault backup
+    /// Register a user from an imported vault backup (legacy: generates new salt)
     pub fn register_imported_user(&self, username: &str, master_password: &str) -> Result<(), String> {
         let mut users = self.load_users();
         if users.iter().any(|u| u.username == username) {
@@ -232,6 +232,17 @@ impl VaultManager {
             salt: salt.to_string(),
         });
 
+        self.save_users(&users)
+    }
+
+    /// Register a user from an imported vault backup using the original profile data.
+    /// This preserves the salt and password_hash so the vault can be decrypted correctly.
+    pub fn register_imported_profile(&self, profile: &UserProfile) -> Result<(), String> {
+        let mut users = self.load_users();
+        if users.iter().any(|u| u.username == profile.username) {
+            return Ok(()); // Already registered
+        }
+        users.push(profile.clone());
         self.save_users(&users)
     }
 

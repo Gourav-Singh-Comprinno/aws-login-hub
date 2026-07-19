@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Plus, Search, Play, Edit2, Trash2, X, Loader2, Globe, Mail } from "lucide-react";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { api } from "../services/api";
 import type { Client, CreateClientRequest } from "../types";
 
@@ -22,7 +23,11 @@ export default function Clients() {
   }
 
   async function handleDelete(id: string, name: string) {
-    if (!confirm(`Delete "${name}"?\nThis removes all stored credentials permanently.`)) return;
+    const confirmed = await confirm(
+      `Delete "${name}"?\nThis removes all stored credentials permanently.`,
+      { title: "Confirm Delete", kind: "warning" }
+    );
+    if (!confirmed) return;
     await api.deleteClient(id); loadClients();
   }
 
@@ -86,7 +91,7 @@ export default function Clients() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-3">
                   <h3 className="font-semibold text-white text-[15px] truncate">{client.name}</h3>
-                  <SessionDot clientId={client.id} lastLogin={client.last_login} />
+                  <SessionDot lastLogin={client.last_login} />
                   {client.environment && <span className="premium-badge bg-purple-500/10 text-purple-400 border border-purple-500/20">{client.environment}</span>}
                 </div>
                 <div className="flex items-center gap-4 mt-1.5">
@@ -243,7 +248,7 @@ function Field({ label, placeholder, value, onChange, type = "text", icon }: { l
   );
 }
 
-function SessionDot({ clientId: _clientId, lastLogin }: { clientId: string; lastLogin: string | null }) {
+function SessionDot({ lastLogin }: { lastLogin: string | null }) {
   if (!lastLogin) return <span className="premium-badge bg-zinc-800 text-zinc-500 border border-zinc-700">Never</span>;
 
   const loginTime = new Date(lastLogin).getTime();
