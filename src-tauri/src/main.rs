@@ -600,31 +600,99 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
 // Login Automation
 // ============================================================
 
+/// Find a binary by checking common paths (needed because GUI apps don't inherit shell PATH)
+fn find_binary(name: &str) -> Option<String> {
+    use std::process::Command;
+
+    // First try the binary directly (works if PATH is set)
+    if let Ok(output) = Command::new(name).arg("--version").output() {
+        if output.status.success() {
+            return Some(name.to_string());
+        }
+    }
+
+    // Check common installation paths
+    let common_paths = [
+        format!("/usr/local/bin/{}", name),
+        format!("/opt/homebrew/bin/{}", name),
+        format!("/usr/bin/{}", name),
+        format!("/opt/local/bin/{}", name),
+        format!("{}/.nvm/versions/node/current/bin/{}", std::env::var("HOME").unwrap_or_default(), name),
+    ];
+
+    #[cfg(target_os = "windows")]
+    let common_paths_win = [
+        format!("C:\\Program Files\\nodejs\\{}.exe", name),
+        format!("{}\\AppData\\Roaming\\npm\\{}.cmd", std::env::var("USERPROFILE").unwrap_or_default(), name),
+    ];
+
+    for path in &common_paths {
+        if std::path::Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    for path in &common_paths_win {
+        if std::path::Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    // Try using `which` / `where` as last resort
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = Command::new("where").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("").trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Ensures Node.js and Playwright are installed. Installs Playwright automatically if missing.
 fn ensure_playwright() -> Result<(), String> {
     use std::process::Command;
 
     // Check if Node.js is available
-    let node_check = Command::new("node").arg("--version").output();
-    if node_check.is_err() || !node_check.unwrap().status.success() {
+    let node_bin = find_binary("node");
+    if node_bin.is_none() {
         return Err("Node.js is not installed. Please install Node.js from https://nodejs.org".to_string());
     }
 
     // Check if npm is available
-    let npm_check = Command::new("npm").arg("--version").output();
-    if npm_check.is_err() || !npm_check.unwrap().status.success() {
+    let npm_bin = find_binary("npm");
+    if npm_bin.is_none() {
         return Err("npm is not installed. Please install Node.js from https://nodejs.org".to_string());
     }
+    let npm = npm_bin.unwrap();
 
     // Check if Playwright is installed globally
-    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+    let npm_root = Command::new(&npm).args(["root", "-g"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
     let playwright_path = std::path::PathBuf::from(&npm_root).join("playwright");
     if !playwright_path.exists() {
         // Auto-install Playwright globally
-        let install = Command::new("npm")
+        let install = Command::new(&npm)
             .args(["install", "-g", "playwright"])
             .output()
             .map_err(|e| format!("Failed to install Playwright: {}", e))?;
@@ -636,7 +704,6 @@ fn ensure_playwright() -> Result<(), String> {
     }
 
     // Check if Chromium browser is downloaded for Playwright
-    // Playwright stores browsers in a known cache directory
     let cache_dir = {
         #[cfg(target_os = "macos")]
         { home_dir().join("Library/Caches/ms-playwright") }
@@ -658,8 +725,8 @@ fn ensure_playwright() -> Result<(), String> {
         .unwrap_or(false);
 
     if !has_chromium {
-        // Auto-install Chromium for Playwright
-        let install = Command::new("npx")
+        let npx_bin = find_binary("npx").unwrap_or_else(|| "npx".to_string());
+        let install = Command::new(&npx_bin)
             .args(["playwright", "install", "chromium"])
             .output()
             .map_err(|e| format!("Failed to install Chromium: {}", e))?;
@@ -679,8 +746,14 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
 
     let _ = &client_id;
 
+    // Find node and npm binaries (GUI apps don't have shell PATH)
+    let node_bin = find_binary("node")
+        .ok_or("Node.js not found. Please install Node.js from https://nodejs.org")?;
+    let npm_bin = find_binary("npm")
+        .ok_or("npm not found. Please install Node.js from https://nodejs.org")?;
+
     // Cross-OS: get npm global root
-    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+    let npm_root = Command::new(&npm_bin).args(["root", "-g"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| {
             #[cfg(target_os = "windows")]
@@ -888,7 +961,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
     }
 
     // Spawn in background — don't block the app
-    let child = Command::new("node")
+    let child = Command::new(&node_bin)
         .arg(&script_path)
         .env("AWSLH_URL", &url)
         .env("AWSLH_EMAIL", &email)
