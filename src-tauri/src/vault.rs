@@ -1,8 +1,8 @@
-/// Encrypted Vault - Argon2id key derivation + AES-256-GCM encryption
-///
-/// Each user gets their own vault file. Vault is encrypted at rest.
-/// Master password is never stored - only used to derive the encryption key.
-/// Key is held in memory only while vault is unlocked, zeroed on lock.
+//! Encrypted Vault - Argon2id key derivation + AES-256-GCM encryption
+//!
+//! Each user gets their own vault file. Vault is encrypted at rest.
+//! Master password is never stored - only used to derive the encryption key.
+//! Key is held in memory only while vault is unlocked, zeroed on lock.
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
@@ -181,7 +181,7 @@ impl VaultManager {
             created_at: chrono::Utc::now().to_rfc3339(),
         };
 
-        let key = self.derive_key(master_password, &salt.to_string())?;
+        let key = self.derive_key(master_password, salt.as_ref())?;
         self.encrypt_and_save(&profile.username, &empty_vault, &key)?;
 
         users.push(profile.clone());
@@ -296,7 +296,7 @@ impl VaultManager {
             .to_string();
 
         // Derive new key and re-encrypt vault
-        let new_key = self.derive_key(new_password, &new_salt.to_string())?;
+        let new_key = self.derive_key(new_password, new_salt.as_ref())?;
         self.encrypt_and_save(&vault.username, &vault.data, &new_key)?;
 
         // Update user profile
