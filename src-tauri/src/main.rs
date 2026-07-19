@@ -105,6 +105,8 @@ pub struct AppState {
     pub vault_manager: VaultManager,
     pub active_vault: Mutex<Option<UnlockedVault>>,
     pub active_db: Mutex<Option<Connection>>,
+    /// Rate limiting: track failed unlock attempts per username
+    pub failed_attempts: Mutex<std::collections::HashMap<String, (u32, std::time::Instant)>>,
 }
 
 // ============================================================
@@ -203,7 +205,43 @@ fn delete_user(state: State<AppState>, username: String, master_password: String
 
 #[tauri::command]
 fn unlock_vault(state: State<AppState>, username: String, master_password: String) -> Result<UserInfo, String> {
-    let unlocked = state.vault_manager.unlock(&username, &master_password)?;
+    // Rate limiting: check for too many failed attempts
+    {
+        let attempts = state.failed_attempts.lock().map_err(|e| e.to_string())?;
+        if let Some((count, last_attempt)) = attempts.get(&username) {
+            let lockout_duration = match *count {
+                0..=2 => std::time::Duration::from_secs(0),
+                3..=4 => std::time::Duration::from_secs(5),
+                5..=6 => std::time::Duration::from_secs(30),
+                7..=9 => std::time::Duration::from_secs(60),
+                _ => std::time::Duration::from_secs(300), // 5 minutes after 10+ failures
+            };
+            if *count >= 3 && last_attempt.elapsed() < lockout_duration {
+                let remaining = lockout_duration.as_secs() - last_attempt.elapsed().as_secs();
+                return Err(format!(
+                    "Too many failed attempts. Please wait {} seconds before trying again.",
+                    remaining
+                ));
+            }
+        }
+    }
+
+    let unlocked = match state.vault_manager.unlock(&username, &master_password) {
+        Ok(v) => {
+            // Clear failed attempts on success
+            let mut attempts = state.failed_attempts.lock().map_err(|e| e.to_string())?;
+            attempts.remove(&username);
+            v
+        }
+        Err(e) => {
+            // Increment failed attempts
+            let mut attempts = state.failed_attempts.lock().map_err(|e| e.to_string())?;
+            let entry = attempts.entry(username.clone()).or_insert((0, std::time::Instant::now()));
+            entry.0 += 1;
+            entry.1 = std::time::Instant::now();
+            return Err(e);
+        }
+    };
 
     // Open user's database
     let db_path = state.vault_manager.db_path(&username);
@@ -438,12 +476,20 @@ fn export_vault(state: State<AppState>, destination: String) -> Result<ExportRes
     let db_bytes = std::fs::read(&db_path)
         .map_err(|e| format!("Failed to read database: {}", e))?;
 
+    // Include user profile (salt + password_hash) so import works on another machine
+    let users = state.vault_manager.load_users();
+    let user_profile = users.iter().find(|u| u.username == *username)
+        .ok_or("User profile not found")?;
+    let profile_json = serde_json::to_string(user_profile)
+        .map_err(|e| format!("Failed to serialize profile: {}", e))?;
+
     let mut bundle: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    bundle.insert("version".to_string(), "1".to_string());
+    bundle.insert("version".to_string(), "2".to_string());
     bundle.insert("username".to_string(), username.clone());
     bundle.insert("exported_at".to_string(), Utc::now().to_rfc3339());
     bundle.insert("vault".to_string(), hex::encode(&vault_bytes));
     bundle.insert("database".to_string(), hex::encode(&db_bytes));
+    bundle.insert("user_profile".to_string(), profile_json);
 
     let json = serde_json::to_vec_pretty(&bundle)
         .map_err(|e| format!("Failed to serialize: {}", e))?;
@@ -496,10 +542,19 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
             .map_err(|e| format!("Failed to backup existing database: {}", e))?;
     }
 
-    // Register user in manifest first (so unlock can find them)
+    // Register user in manifest — prefer embedded profile (v2) over generating new one
     let user_existed = state.vault_manager.load_users().iter().any(|u| u.username == username);
     if !user_existed {
-        state.vault_manager.register_imported_user(&username, &master_password)?;
+        if let Some(profile_json) = bundle.get("user_profile") {
+            // v2 export: use the original profile with correct salt + password_hash
+            let profile: vault::UserProfile = serde_json::from_str(profile_json)
+                .map_err(|e| format!("Invalid user profile in backup: {}", e))?;
+            state.vault_manager.register_imported_profile(&profile)?;
+        } else {
+            // v1 export (legacy): generate new profile — note: this may fail for vaults
+            // encrypted with a different salt, but we verify below
+            state.vault_manager.register_imported_user(&username, &master_password)?;
+        }
     }
 
     // Write imported files
@@ -545,12 +600,86 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
 // Login Automation
 // ============================================================
 
+/// Ensures Node.js and Playwright are installed. Installs Playwright automatically if missing.
+fn ensure_playwright() -> Result<(), String> {
+    use std::process::Command;
+
+    // Check if Node.js is available
+    let node_check = Command::new("node").arg("--version").output();
+    if node_check.is_err() || !node_check.unwrap().status.success() {
+        return Err("Node.js is not installed. Please install Node.js from https://nodejs.org".to_string());
+    }
+
+    // Check if npm is available
+    let npm_check = Command::new("npm").arg("--version").output();
+    if npm_check.is_err() || !npm_check.unwrap().status.success() {
+        return Err("npm is not installed. Please install Node.js from https://nodejs.org".to_string());
+    }
+
+    // Check if Playwright is installed globally
+    let npm_root = Command::new("npm").args(["root", "-g"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let playwright_path = std::path::PathBuf::from(&npm_root).join("playwright");
+    if !playwright_path.exists() {
+        // Auto-install Playwright globally
+        let install = Command::new("npm")
+            .args(["install", "-g", "playwright"])
+            .output()
+            .map_err(|e| format!("Failed to install Playwright: {}", e))?;
+
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            return Err(format!("Failed to install Playwright: {}", stderr));
+        }
+    }
+
+    // Check if Chromium browser is downloaded for Playwright
+    // Playwright stores browsers in a known cache directory
+    let cache_dir = {
+        #[cfg(target_os = "macos")]
+        { home_dir().join("Library/Caches/ms-playwright") }
+        #[cfg(target_os = "linux")]
+        { home_dir().join(".cache/ms-playwright") }
+        #[cfg(target_os = "windows")]
+        {
+            std::path::PathBuf::from(
+                std::env::var("LOCALAPPDATA").unwrap_or_else(|_| home_dir().to_string_lossy().to_string())
+            ).join("ms-playwright")
+        }
+    };
+
+    let has_chromium = cache_dir.exists() && std::fs::read_dir(&cache_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("chromium")
+        }))
+        .unwrap_or(false);
+
+    if !has_chromium {
+        // Auto-install Chromium for Playwright
+        let install = Command::new("npx")
+            .args(["playwright", "install", "chromium"])
+            .output()
+            .map_err(|e| format!("Failed to install Chromium: {}", e))?;
+
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr);
+            return Err(format!("Failed to install Chromium for Playwright: {}", stderr));
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 fn run_login(_state: State<AppState>, url: String, email: String, password: String, client_id: String) -> Result<LoginResponse, String> {
     use std::process::Command;
-    use std::io::Write;
 
-    // Cross-OS: get npm global root and normalize path separators for JS
+    let _ = &client_id;
+
+    // Cross-OS: get npm global root
     let npm_root = Command::new("npm").args(["root", "-g"]).output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| {
@@ -562,80 +691,203 @@ fn run_login(_state: State<AppState>, url: String, email: String, password: Stri
             { "/usr/lib/node_modules".to_string() }
         });
 
-    // Normalize backslashes to forward slashes for JS require() compatibility
     let npm_root_js = npm_root.replace('\\', "/");
 
-    // Script uses machine's installed Chrome (not Playwright's Chromium)
-    // Runs non-blocking — app stays usable while browser is open
+    // Detect system default browser and map to Playwright channel
+    #[cfg(target_os = "macos")]
+    let default_channel = {
+        let output = Command::new("defaults")
+            .args(["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
+            .output()
+            .ok()
+            .and_then(|o| Some(String::from_utf8_lossy(&o.stdout).to_string()));
+        
+        if let Some(ref handlers) = output {
+            if handlers.contains("com.google.chrome") {
+                "chrome"
+            } else if handlers.contains("com.microsoft.edgemac") {
+                "msedge"
+            } else if handlers.contains("com.brave.browser") {
+                "chrome"
+            } else {
+                "chrome"
+            }
+        } else {
+            "chrome"
+        }
+    };
+
+    #[cfg(target_os = "windows")]
+    let default_channel = {
+        // Query Windows registry for default HTTP handler
+        let output = Command::new("reg")
+            .args(["query", r"HKEY_CURRENT_USER\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice", "/v", "ProgId"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        if output.contains("ChromeHTML") || output.contains("Google") {
+            "chrome"
+        } else if output.contains("MSEdgeHTM") || output.contains("Edge") {
+            "msedge"
+        } else if output.contains("BraveHTML") || output.contains("Brave") {
+            "chrome"
+        } else {
+            // Fallback: check which browser exe exists
+            let chrome_exists = std::path::Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe").exists()
+                || std::path::Path::new(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe").exists();
+            let edge_exists = std::path::Path::new(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe").exists();
+
+            if chrome_exists { "chrome" }
+            else if edge_exists { "msedge" }
+            else { "chrome" }
+        }
+    };
+
+    #[cfg(target_os = "linux")]
+    let default_channel = {
+        // Query xdg-settings for default browser
+        let output = Command::new("xdg-settings")
+            .args(["get", "default-web-browser"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        if output.contains("google-chrome") || output.contains("chrome") {
+            "chrome"
+        } else if output.contains("microsoft-edge") || output.contains("msedge") {
+            "msedge"
+        } else if output.contains("brave") {
+            "chrome"
+        } else if output.contains("chromium") {
+            "chromium"
+        } else {
+            // Fallback: check which browser binary exists in PATH
+            let chrome_exists = Command::new("which").arg("google-chrome").output()
+                .map(|o| o.status.success()).unwrap_or(false);
+            let chromium_exists = Command::new("which").arg("chromium-browser").output()
+                .map(|o| o.status.success()).unwrap_or(false)
+                || Command::new("which").arg("chromium").output()
+                .map(|o| o.status.success()).unwrap_or(false);
+            let edge_exists = Command::new("which").arg("microsoft-edge").output()
+                .map(|o| o.status.success()).unwrap_or(false);
+
+            if chrome_exists { "chrome" }
+            else if edge_exists { "msedge" }
+            else if chromium_exists { "chromium" }
+            else { "chrome" }
+        }
+    };
+
+    // Playwright script: auto-fills email & password, stops before MFA/OTP
     let script = format!(r#"
 const {{ chromium }} = require('{npm_root}/playwright');
 (async () => {{
   const url = process.env.AWSLH_URL;
   const email = process.env.AWSLH_EMAIL;
   const password = process.env.AWSLH_PASSWORD;
+  const channel = process.env.AWSLH_CHANNEL || 'chrome';
+
+  const channels = [channel, 'chrome', 'msedge', 'chromium'];
   let browser;
+
+  // Try each browser channel until one works
+  for (const ch of channels) {{
+    try {{
+      browser = await chromium.launch({{
+        headless: false,
+        channel: ch,
+        args: ['--start-maximized']
+      }});
+      break;
+    }} catch (e) {{
+      continue;
+    }}
+  }}
+
+  if (!browser) {{
+    console.error('No supported browser found (Chrome, Edge, or Chromium required)');
+    process.exit(1);
+  }}
+
   try {{
-    // Use machine's installed Chrome/Edge instead of Playwright's bundled Chromium
-    browser = await chromium.launch({{
-      headless: false,
-      channel: 'chrome',
-      args: ['--start-maximized']
-    }});
     const context = await browser.newContext({{ viewport: null }});
     const page = await context.newPage();
     await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
     await page.waitForTimeout(2000);
-    // Fill email
+
+    // Step 1: Fill email
     const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
-    for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill(email); break; }} }} catch {{}} }}
-    // Click next
+    for (const sel of emailSels) {{
+      try {{
+        const el = await page.waitForSelector(sel, {{ timeout: 3000 }});
+        if (el) {{ await el.fill(email); break; }}
+      }} catch {{}}
+    }}
+
+    // Step 2: Click Next/Sign-in
     const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
-    for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
+    for (const sel of nextSels) {{
+      try {{
+        const btn = await page.waitForSelector(sel, {{ timeout: 3000 }});
+        if (btn) {{ await btn.click(); break; }}
+      }} catch {{}}
+    }}
     await page.waitForTimeout(3000);
-    // Fill password
+
+    // Step 3: Fill password (if password field appears — skip if it's an OTP/MFA page)
     const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
-    for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill(password); break; }} }} catch {{}} }}
-    // Click submit
-    for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
-    // Keep browser open — wait until user closes it
-    // This keeps the node process alive so Chrome doesn't exit
+    for (const sel of pwSels) {{
+      try {{
+        const el = await page.waitForSelector(sel, {{ timeout: 10000 }});
+        if (el) {{ await el.fill(password); break; }}
+      }} catch {{}}
+    }}
+
+    // Step 4: Click Submit
+    for (const sel of nextSels) {{
+      try {{
+        const btn = await page.waitForSelector(sel, {{ timeout: 3000 }});
+        if (btn) {{ await btn.click(); break; }}
+      }} catch {{}}
+    }}
+
+    // Step 5: STOP here — do NOT fill MFA/OTP fields
+    // The user will manually enter their MFA code or email OTP
+    // Keep browser open until user closes it
     await new Promise((resolve) => {{
       browser.on('disconnected', resolve);
     }});
   }} catch (error) {{
-    // If Chrome not found, try msedge
-    if (error.message && (error.message.includes('channel') || error.message.includes('Chrome'))) {{
-      try {{
-        browser = await chromium.launch({{ headless: false, channel: 'msedge', args: ['--start-maximized'] }});
-        const context = await browser.newContext({{ viewport: null }});
-        const page = await context.newPage();
-        await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
-        await page.waitForTimeout(2000);
-        const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
-        for (const sel of emailSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (el) {{ await el.fill(email); break; }} }} catch {{}} }}
-        const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
-        for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
-        await page.waitForTimeout(3000);
-        const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
-        for (const sel of pwSels) {{ try {{ const el = await page.waitForSelector(sel, {{ timeout: 10000 }}); if (el) {{ await el.fill(password); break; }} }} catch {{}} }}
-        for (const sel of nextSels) {{ try {{ const btn = await page.waitForSelector(sel, {{ timeout: 3000 }}); if (btn) {{ await btn.click(); break; }} }} catch {{}} }}
-        await new Promise((resolve) => {{ browser.on('disconnected', resolve); }});
-      }} catch (e2) {{
-        process.exit(1);
-      }}
-    }} else {{
-      if (browser) try {{ await browser.close(); }} catch {{}}
-      process.exit(1);
+    // Keep browser open even on error so user can continue manually
+    if (browser) {{
+      await new Promise((resolve) => {{
+        browser.on('disconnected', resolve);
+      }});
     }}
   }}
 }})();
 "#, npm_root=npm_root_js);
 
     let tmp_dir = std::env::temp_dir();
-    let script_path = tmp_dir.join(format!("awslh-{}.js", client_id));
-    let mut file = std::fs::File::create(&script_path).map_err(|e| e.to_string())?;
-    file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
-    drop(file);
+    let random_id = uuid::Uuid::new_v4().to_string();
+    let script_path = tmp_dir.join(format!("awslh-{}.js", random_id));
+
+    // Write with restrictive permissions
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&script_path).map_err(|e| e.to_string())?;
+        file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
+        drop(file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+    }
 
     // Spawn in background — don't block the app
     let child = Command::new("node")
@@ -643,12 +895,11 @@ const {{ chromium }} = require('{npm_root}/playwright');
         .env("AWSLH_URL", &url)
         .env("AWSLH_EMAIL", &email)
         .env("AWSLH_PASSWORD", &password)
+        .env("AWSLH_CHANNEL", default_channel)
         .spawn();
 
     match child {
         Ok(_) => {
-            // Return immediately — browser opens in background, app stays usable
-            // Cleanup script after a delay (node will have read it by then)
             let path_clone = script_path.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(10));
@@ -657,7 +908,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
 
             Ok(LoginResponse {
                 success: true,
-                message: "Browser opened. Complete MFA if prompted.".to_string(),
+                message: "Browser opened with credentials filled. Complete MFA manually.".to_string(),
                 step: "completed".to_string(),
             })
         }
@@ -714,6 +965,13 @@ fn generate_aws_config(state: State<AppState>) -> Result<String, String> {
     let aws_dir = home_dir().join(".aws");
     std::fs::create_dir_all(&aws_dir).ok();
     let config_path = aws_dir.join("config");
+
+    // Backup existing config before modification
+    if config_path.exists() {
+        let backup_path = aws_dir.join("config.bak");
+        std::fs::copy(&config_path, &backup_path)
+            .map_err(|e| format!("Failed to backup ~/.aws/config: {}", e))?;
+    }
 
     // Read existing config and replace auto-generated section
     let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -1019,12 +1277,27 @@ const ALLOWED_COMMANDS: &[&str] = &[
 fn run_terminal_command(command: String, profile: String) -> Result<String, String> {
     use std::process::Command;
 
-    let trimmed = command.trim().to_lowercase();
+    let trimmed = command.trim();
+    let trimmed_lower = trimmed.to_lowercase();
+
+    // Security: reject commands containing shell metacharacters to prevent injection
+    const SHELL_METACHARACTERS: &[&str] = &[
+        ";", "&&", "||", "|", "`", "$(", "${", ">", "<", ">>",
+        "\\n", "\n", "\r", "&", "#",
+    ];
+    for meta in SHELL_METACHARACTERS {
+        if trimmed.contains(meta) {
+            return Err(format!(
+                "Command rejected: shell operators are not allowed for security reasons.\nRemove '{}' from your command.",
+                meta
+            ));
+        }
+    }
 
     // Security: only allow safe commands
-    let allowed = ALLOWED_COMMANDS.iter().any(|prefix| trimmed.starts_with(prefix))
-        || trimmed == "whoami"
-        || trimmed == "hostname";
+    let allowed = ALLOWED_COMMANDS.iter().any(|prefix| trimmed_lower.starts_with(prefix))
+        || trimmed_lower == "whoami"
+        || trimmed_lower == "hostname";
 
     if !allowed {
         return Err(format!(
@@ -1032,21 +1305,16 @@ fn run_terminal_command(command: String, profile: String) -> Result<String, Stri
         ));
     }
 
-    // Cross-OS shell execution
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", &command]);
-        c
-    };
+    // Execute command directly without a shell to prevent injection
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.is_empty() {
+        return Err("Empty command".to_string());
+    }
 
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        let mut c = Command::new(shell);
-        c.arg("-c").arg(&command);
-        c
-    };
+    let mut cmd = Command::new(parts[0]);
+    if parts.len() > 1 {
+        cmd.args(&parts[1..]);
+    }
 
     if !profile.is_empty() {
         cmd.env("AWS_PROFILE", &profile);
@@ -1081,16 +1349,27 @@ fn check_biometric_available() -> Result<bool, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        // macOS Touch ID is available on most modern Macs
+        // macOS Touch ID — check if biometric enrollment exists
         let output = std::process::Command::new("bioutil")
             .args(["--currentUser", "--enrolled"])
             .output();
-        Ok(output.map(|o| String::from_utf8_lossy(&o.stdout).contains("enrolled")).unwrap_or(false))
+        Ok(output.map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            o.status.success() && stdout.contains("1")
+        }).unwrap_or(false))
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows Hello availability check
-        Ok(true) // Most modern Windows devices have Hello
+        // Windows Hello: check if WinBioEnumBiometricUnits reports available sensors
+        // Use PowerShell to query WMI for biometric devices
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "Get-WmiObject -Namespace 'root\\CIMV2' -Class Win32_PnPEntity | Where-Object { $_.Name -match 'fingerprint|biometric|face|ir camera' } | Select-Object -First 1 | ForEach-Object { 'found' }"])
+            .output();
+        Ok(output.map(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            o.status.success() && stdout.contains("found")
+        }).unwrap_or(false))
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -1105,6 +1384,14 @@ fn check_biometric_available() -> Result<bool, String> {
 fn main() {
     let vault_manager = VaultManager::new();
 
+    // Auto-install Playwright + Chromium in background at startup
+    // This runs async so it doesn't block the app from opening
+    std::thread::spawn(|| {
+        if let Err(e) = ensure_playwright() {
+            eprintln!("Playwright setup warning: {}", e);
+        }
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1114,6 +1401,7 @@ fn main() {
             vault_manager,
             active_vault: Mutex::new(None),
             active_db: Mutex::new(None),
+            failed_attempts: Mutex::new(std::collections::HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             // User & vault

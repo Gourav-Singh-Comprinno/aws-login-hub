@@ -49,7 +49,6 @@ export const api = {
 
   // AWS CLI & SSO
   async generateAwsConfig(): Promise<string> { return invoke("generate_aws_config"); },
-  async getAwsProfiles(): Promise<string[]> { return invoke("get_aws_profiles"); },
   async refreshSsoToken(profile: string): Promise<{ profile: string; success: boolean; message: string }> {
     return invoke("refresh_sso_token", { profile });
   },

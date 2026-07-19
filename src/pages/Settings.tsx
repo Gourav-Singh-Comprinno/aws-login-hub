@@ -113,7 +113,7 @@ export default function SettingsPage({ currentUser, onLock }: SettingsProps) {
           <Info size={16} /> About
         </h3>
         <div className="space-y-2 text-sm text-gray-400">
-          <p><span className="text-gray-300">Version:</span> 0.2.0</p>
+          <p><span className="text-gray-300">Version:</span> 1.7.1</p>
           <p><span className="text-gray-300">Security:</span> Argon2id + AES-256-GCM + Zeroize</p>
           <p><span className="text-gray-300">Storage:</span> ~/.aws-login-hub/ (local encrypted vaults)</p>
           <p className="text-xs text-gray-500 mt-4 pt-3 border-t border-gray-700">
@@ -242,7 +242,6 @@ function ImportSection() {
               <div>
                 <Upload size={24} className="mx-auto text-gray-500 mb-2" />
                 <p className="text-sm text-gray-300">Click to select .vault-backup file</p>
-                <p className="text-xs text-gray-500 mt-1">or drag and drop here</p>
               </div>
             )}
           </div>
