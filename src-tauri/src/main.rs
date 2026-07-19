@@ -741,7 +741,7 @@ fn ensure_playwright() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn run_login(_state: State<AppState>, url: String, email: String, password: String, client_id: String) -> Result<LoginResponse, String> {
+fn run_login(_state: State<AppState>, url: String, email: String, password: String, client_id: String, client_name: String) -> Result<LoginResponse, String> {
     use std::process::Command;
 
     let _ = &client_id;
@@ -859,6 +859,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
   const password = process.env.AWSLH_PASSWORD;
   const channel = process.env.AWSLH_CHANNEL || '';
   const execPath = process.env.AWSLH_EXEC_PATH || '';
+  const clientName = process.env.AWSLH_CLIENT_NAME || 'AWS Login';
 
   let browser;
 
@@ -901,6 +902,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
     const context = await browser.newContext({{ viewport: null }});
     const page = await context.newPage();
     await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
+    await page.evaluate((name) => {{ document.title = name + ' - AWS Login'; }}, clientName);
     await page.waitForTimeout(2000);
 
     // Step 1: Fill email
@@ -982,6 +984,7 @@ const {{ chromium }} = require('{npm_root}/playwright');
         .env("AWSLH_PASSWORD", &password)
         .env("AWSLH_CHANNEL", default_channel)
         .env("AWSLH_EXEC_PATH", default_exec_path)
+        .env("AWSLH_CLIENT_NAME", &client_name)
         .spawn();
 
     match child {

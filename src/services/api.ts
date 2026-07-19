@@ -43,8 +43,8 @@ export const api = {
   async getClientPassword(id: string): Promise<string> { return invoke("get_client_password", { id }); },
 
   // Login (opens Chrome with auto-fill, non-blocking)
-  async runLogin(url: string, email: string, password: string, clientId: string): Promise<{ success: boolean; message: string }> {
-    return invoke("run_login", { url, email, password, clientId });
+  async runLogin(url: string, email: string, password: string, clientId: string, clientName: string): Promise<{ success: boolean; message: string }> {
+    return invoke("run_login", { url, email, password, clientId, clientName });
   },
 
   // AWS CLI & SSO
