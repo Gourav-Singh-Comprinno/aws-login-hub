@@ -120,17 +120,14 @@ chmod +x aws-login-hub_*.AppImage
 
 ## Setup After Install
 
-Install Playwright (required for credential auto-fill):
+**No manual setup required.** The app automatically installs Playwright and Chromium on first launch.
 
-```bash
-npm install -g playwright
-npx playwright install chromium
-```
-
-**macOS users:** If login says "Node.js not found", run:
+**macOS users:** If login says "Node.js not found", ensure Node.js is installed and run:
 ```bash
 sudo ln -sf $(which node) /usr/local/bin/node
 ```
+
+**Prerequisites:** Node.js 18+ must be installed on your system ([download here](https://nodejs.org)).
 
 ---
 

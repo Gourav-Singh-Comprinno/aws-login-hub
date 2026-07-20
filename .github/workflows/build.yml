@@ -107,11 +107,10 @@ jobs:
             chmod +x aws-login-hub_*.AppImage && ./aws-login-hub_*.AppImage
             ```
 
-            ### Post-Install Setup
-            ```bash
-            npm install -g playwright
-            npx playwright install chromium
-            ```
+            ### Post-Install
+            - **Node.js 18+** required ([download](https://nodejs.org))
+            - Playwright + Chromium are installed automatically on first launch
+            - **macOS:** If login fails, run: `sudo ln -sf $(which node) /usr/local/bin/node`
 
             ### Security
             - AES-256-GCM encryption with Argon2id key derivation

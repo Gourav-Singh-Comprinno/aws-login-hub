@@ -657,6 +657,57 @@ fn find_binary(name: &str) -> Option<String> {
     None
 }
 
+/// Auto-installs Playwright + Chromium if not already present.
+/// Runs at startup in background so the user never has to do manual setup.
+fn ensure_playwright() {
+    use std::process::Command;
+
+    let npm_bin = match find_binary("npm") {
+        Some(b) => b,
+        None => return, // No npm = no Node.js, can't auto-install
+    };
+
+    // Check if Playwright is installed globally
+    let npm_root = Command::new(&npm_bin).args(["root", "-g"]).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let playwright_path = std::path::PathBuf::from(&npm_root).join("playwright");
+    if !playwright_path.exists() {
+        // Auto-install Playwright globally
+        let _ = Command::new(&npm_bin)
+            .args(["install", "-g", "playwright"])
+            .output();
+    }
+
+    // Check if Chromium is downloaded
+    let cache_dir = {
+        #[cfg(target_os = "macos")]
+        { home_dir().join("Library/Caches/ms-playwright") }
+        #[cfg(target_os = "linux")]
+        { home_dir().join(".cache/ms-playwright") }
+        #[cfg(target_os = "windows")]
+        {
+            std::path::PathBuf::from(
+                std::env::var("LOCALAPPDATA").unwrap_or_else(|_| home_dir().to_string_lossy().to_string())
+            ).join("ms-playwright")
+        }
+    };
+
+    let has_chromium = cache_dir.exists() && std::fs::read_dir(&cache_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
+            e.file_name().to_string_lossy().starts_with("chromium")
+        }))
+        .unwrap_or(false);
+
+    if !has_chromium {
+        let npx_bin = find_binary("npx").unwrap_or_else(|| "npx".to_string());
+        let _ = Command::new(&npx_bin)
+            .args(["playwright", "install", "chromium"])
+            .output();
+    }
+}
+
 /// AWS SSO OIDC response: client registration
 #[derive(Debug, Deserialize)]
 struct OidcRegistration {
@@ -1504,6 +1555,9 @@ fn check_biometric_available() -> Result<bool, String> {
 
 fn main() {
     let vault_manager = VaultManager::new();
+
+    // Auto-install Playwright + Chromium in background (user never needs to do it manually)
+    std::thread::spawn(|| { ensure_playwright(); });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
