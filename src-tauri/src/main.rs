@@ -750,12 +750,13 @@ struct OidcError {
     error_description: Option<String>,
 }
 
-/// Hybrid Login:
-/// 1. OIDC API → gets device code + verification URL (no browser)
-/// 2. Playwright opens verification URL OFF-SCREEN, auto-fills email/password
-/// 3. When MFA page detected → moves browser window ON-SCREEN (user sees only MFA)
-/// 4. Polls CreateToken in background until auth completes
-/// 5. Caches token + opens SSO access portal
+/// Hybrid Login — Robust implementation handling all scenarios:
+/// - Network failures during OIDC calls
+/// - User closes browser before completing MFA
+/// - Login timeout (device code expires)
+/// - Playwright/Node.js not available (falls back to default browser)
+/// - Invalid credentials (Playwright errors)
+/// - Token caching failures (non-fatal)
 #[tauri::command]
 async fn run_login_sso(
     _state: State<'_, AppState>,
@@ -768,220 +769,310 @@ async fn run_login_sso(
 ) -> Result<LoginResponse, String> {
     let _ = &client_id;
 
-    let region = if sso_region.is_empty() { "us-east-1".to_string() } else { sso_region };
+    let region = if sso_region.is_empty() { "us-east-1".to_string() } else { sso_region.clone() };
     let oidc_endpoint = format!("https://oidc.{}.amazonaws.com", region);
-    let http = reqwest::Client::new();
+
+    // HTTP client with timeouts to prevent hanging
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
     // ─── Step 1: Register OIDC Client ──────────────────────────────
-    let register_body = serde_json::json!({
-        "clientName": format!("aws-login-hub-{}", client_name),
-        "clientType": "public",
-        "scopes": ["sso:account:access"]
-    });
-
     let register_resp = http
         .post(format!("{}/client/register", oidc_endpoint))
         .header("Content-Type", "application/json")
-        .json(&register_body)
+        .json(&serde_json::json!({
+            "clientName": format!("aws-login-hub-{}", client_name),
+            "clientType": "public",
+            "scopes": ["sso:account:access"]
+        }))
         .send()
         .await
-        .map_err(|e| format!("Network error registering OIDC client: {}", e))?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                "Connection timed out. Check your internet connection and try again.".to_string()
+            } else if e.is_connect() {
+                format!("Cannot reach AWS SSO endpoint ({}). Check your network.", oidc_endpoint)
+            } else {
+                format!("Network error: {}", e)
+            }
+        })?;
 
     if !register_resp.status().is_success() {
         let status = register_resp.status();
         let body = register_resp.text().await.unwrap_or_default();
-        return Err(format!("OIDC RegisterClient failed ({}): {}", status, body));
+        return Err(format!("AWS rejected client registration (HTTP {}). Check your SSO region is correct.\nDetails: {}", status.as_u16(), body));
     }
 
-    let registration: OidcRegistration = register_resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse registration response: {}", e))?;
+    let registration: OidcRegistration = register_resp.json().await
+        .map_err(|_| "Unexpected response from AWS. Please try again.".to_string())?;
 
     // ─── Step 2: Start Device Authorization ────────────────────────
-    let device_auth_body = serde_json::json!({
-        "clientId": registration.client_id,
-        "clientSecret": registration.client_secret,
-        "startUrl": url
-    });
-
     let device_resp = http
         .post(format!("{}/device_authorization", oidc_endpoint))
         .header("Content-Type", "application/json")
-        .json(&device_auth_body)
+        .json(&serde_json::json!({
+            "clientId": registration.client_id,
+            "clientSecret": registration.client_secret,
+            "startUrl": url
+        }))
         .send()
         .await
-        .map_err(|e| format!("Network error starting device authorization: {}", e))?;
+        .map_err(|e| {
+            if e.is_timeout() {
+                "Connection timed out during device authorization.".to_string()
+            } else {
+                format!("Network error: {}", e)
+            }
+        })?;
 
     if !device_resp.status().is_success() {
         let status = device_resp.status();
         let body = device_resp.text().await.unwrap_or_default();
-        return Err(format!("OIDC StartDeviceAuthorization failed ({}): {}", status, body));
+        if body.contains("InvalidClientException") {
+            return Err("Invalid SSO configuration. Check your Identity Center URL and region.".to_string());
+        }
+        return Err(format!("Device authorization failed (HTTP {}): {}", status.as_u16(), body));
     }
 
-    let device_auth: DeviceAuthResponse = device_resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse device authorization response: {}", e))?;
+    let device_auth: DeviceAuthResponse = device_resp.json().await
+        .map_err(|_| "Unexpected response from AWS during device authorization.".to_string())?;
 
-    // ─── Step 3: Playwright auto-fills credentials off-screen ─────
-    // Browser starts off-screen (invisible). Fills email + password.
-    // When MFA/OTP page detected → moves window on-screen so user sees only MFA.
+    // ─── Step 3: Launch browser for credential auto-fill ──────────
     let verification_url = if device_auth.verification_uri_complete.is_empty() {
         device_auth.verification_uri.clone()
     } else {
         device_auth.verification_uri_complete.clone()
     };
 
-    let node_bin = find_binary("node")
-        .ok_or("Node.js not found. Install from https://nodejs.org")?;
-    let npm_bin = find_binary("npm")
-        .ok_or("npm not found. Install Node.js from https://nodejs.org")?;
+    // Try Playwright auto-fill. If Node.js/Playwright unavailable, fall back to default browser.
+    let mut playwright_child: Option<std::process::Child> = None;
 
-    let npm_root = std::process::Command::new(&npm_bin)
-        .args(["root", "-g"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-        .replace('\\', "/");
+    let node_bin = find_binary("node");
+    let npm_bin = find_binary("npm");
 
-    let script = format!(r#"
+    if let (Some(ref node), Some(ref npm)) = (&node_bin, &npm_bin) {
+        let npm_root = std::process::Command::new(npm)
+            .args(["root", "-g"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+            .replace('\\', "/");
+
+        // Check if Playwright is actually installed
+        let playwright_exists = std::path::PathBuf::from(&npm_root).join("playwright").exists();
+
+        if playwright_exists {
+            let script = format!(r#"
 const {{ chromium }} = require('{npm_root}/playwright');
+
 (async () => {{
   const url = process.env.AWSLH_VERIFY_URL;
   const email = process.env.AWSLH_EMAIL;
   const password = process.env.AWSLH_PASSWORD;
   const clientName = process.env.AWSLH_CLIENT_NAME || 'AWS Login';
 
-  const browser = await chromium.launch({{
-    headless: false,
-    args: ['--start-maximized']
-  }});
+  let browser;
+  // Try launching the user's default/installed browser first
+  const channels = ['chrome', 'msedge', 'chrome-beta', 'chromium'];
+  const bravePaths = {{
+    darwin: '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+    win32: 'C:\\\\Program Files\\\\BraveSoftware\\\\Brave-Browser\\\\Application\\\\brave.exe',
+    linux: '/usr/bin/brave-browser'
+  }};
+  const firefoxPaths = {{
+    darwin: '/Applications/Firefox.app/Contents/MacOS/firefox',
+    win32: 'C:\\\\Program Files\\\\Mozilla Firefox\\\\firefox.exe',
+    linux: '/usr/bin/firefox'
+  }};
+  const os = require('os');
+  const fs = require('fs');
+  const platform = os.platform();
+
+  // Try Brave first (executablePath)
+  const bravePath = bravePaths[platform];
+  if (bravePath && fs.existsSync(bravePath)) {{
+    try {{
+      browser = await chromium.launch({{ headless: false, executablePath: bravePath, args: ['--start-maximized'] }});
+    }} catch {{}}
+  }}
+
+  // Try standard Chromium-based channels
+  if (!browser) {{
+    for (const ch of channels) {{
+      try {{
+        browser = await chromium.launch({{ headless: false, channel: ch, args: ['--start-maximized'] }});
+        break;
+      }} catch {{}}
+    }}
+  }}
+
+  // Try Firefox
+  if (!browser) {{
+    const {{ firefox }} = require('{npm_root}/playwright');
+    const ffPath = firefoxPaths[platform];
+    if (ffPath && fs.existsSync(ffPath)) {{
+      try {{
+        browser = await firefox.launch({{ headless: false, executablePath: ffPath }});
+      }} catch {{}}
+    }}
+    if (!browser) {{
+      try {{
+        browser = await firefox.launch({{ headless: false }});
+      }} catch {{}}
+    }}
+  }}
+
+  // Fallback to bundled Playwright chromium
+  if (!browser) {{
+    try {{
+      browser = await chromium.launch({{ headless: false, args: ['--start-maximized'] }});
+    }} catch (e) {{
+      console.error('No browser available:', e.message);
+      process.exit(1);
+    }}
+  }}
 
   const context = await browser.newContext({{ viewport: null }});
   const page = await context.newPage();
 
+  // Handle unexpected page close
+  page.on('close', () => {{ process.exit(0); }});
+  browser.on('disconnected', () => {{ process.exit(0); }});
+
   try {{
-    await page.goto(url, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
+    await page.goto(url, {{ waitUntil: 'domcontentloaded', timeout: 20000 }});
     await page.evaluate((name) => {{ document.title = name + ' - Logging in...'; }}, clientName);
 
-    // Click "Confirm and continue" — wait until button is ready
-    const confirmBtn = await page.waitForSelector(
-      'button:has-text("Confirm and continue"), button:has-text("Confirm"), button[type="submit"]',
-      {{ timeout: 10000 }}
-    );
-    if (confirmBtn) await confirmBtn.click();
+    // Click "Confirm and continue"
+    try {{
+      const confirmBtn = await page.waitForSelector(
+        'button:has-text("Confirm and continue"), button:has-text("Confirm"), button[type="submit"]',
+        {{ timeout: 8000 }}
+      );
+      if (confirmBtn) await confirmBtn.click();
+    }} catch {{}}
 
-    // Wait for email field to appear (page navigation after confirm)
-    const emailField = await page.waitForSelector(
-      '#awsui-input-0, input[type="email"], input[name="email"], input[name="username"]',
-      {{ timeout: 10000 }}
-    );
+    // Fill email — wait for field, type naturally
+    try {{
+      const emailField = await page.waitForSelector(
+        '#awsui-input-0, input[type="email"], input[name="email"], input[name="username"]',
+        {{ timeout: 8000 }}
+      );
+      if (emailField) {{
+        await emailField.click();
+        await emailField.fill('');
+        await emailField.type(email, {{ delay: 10 }});
+      }}
+    }} catch {{}}
 
-    if (emailField) {{
-      // Clear any existing value, then type character by character (triggers validation)
-      await emailField.click();
-      await emailField.fill('');
-      await emailField.type(email, {{ delay: 10 }});
-    }}
+    // Click Next
+    try {{
+      const nextBtn = await page.waitForSelector(
+        'button[type="submit"], button:has-text("Next"), button:has-text("Sign in")',
+        {{ timeout: 5000 }}
+      );
+      if (nextBtn) await nextBtn.click();
+    }} catch {{}}
 
-    // Click Next — wait for it to be available
-    const nextBtn = await page.waitForSelector(
-      'button[type="submit"], button:has-text("Next"), button:has-text("Sign in")',
-      {{ timeout: 5000 }}
-    );
-    if (nextBtn) await nextBtn.click();
-
-    // Wait for password field
-    const pwField = await page.waitForSelector(
-      'input[type="password"], input[name="password"], #password',
-      {{ timeout: 10000 }}
-    );
-
-    if (pwField) {{
-      await pwField.click();
-      await pwField.type(password, {{ delay: 10 }});
-    }}
+    // Fill password
+    try {{
+      const pwField = await page.waitForSelector(
+        'input[type="password"], input[name="password"], #password',
+        {{ timeout: 8000 }}
+      );
+      if (pwField) {{
+        await pwField.click();
+        await pwField.type(password, {{ delay: 10 }});
+      }}
+    }} catch {{}}
 
     // Click Sign in
-    const signInBtn = await page.waitForSelector(
-      'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
-      {{ timeout: 5000 }}
-    );
-    if (signInBtn) await signInBtn.click();
+    try {{
+      const signInBtn = await page.waitForSelector(
+        'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
+        {{ timeout: 5000 }}
+      );
+      if (signInBtn) await signInBtn.click();
+    }} catch {{}}
 
     await page.evaluate((name) => {{ document.title = name + ' - Enter MFA Code'; }}, clientName);
 
-    // Auto-close when MFA is done
-    const maxWait = 300000;
-    const start = Date.now();
-    while (Date.now() - start < maxWait) {{
-      await page.waitForTimeout(1500);
-      try {{
-        const content = await page.content();
-        const pageUrl = page.url();
-        if (content.includes('Request approved') ||
-            content.includes('You can close this window') ||
-            content.includes('request has been approved') ||
-            pageUrl.includes('console.aws.amazon.com') ||
-            pageUrl.includes('/start#/')) {{
-          await page.waitForTimeout(500);
-          await browser.close();
-          return;
-        }}
-      }} catch {{
-        break;
-      }}
-    }}
-
-    await new Promise((resolve) => {{ browser.on('disconnected', resolve); }});
+    // Wait — the parent process will kill us when token is received
+    // Or user closes the browser manually (handled by 'disconnected' event)
+    await new Promise(() => {{}});
   }} catch (error) {{
-    await new Promise((resolve) => {{ browser.on('disconnected', resolve); }});
+    // Keep browser open on error for manual completion
+    try {{
+      await page.evaluate((name) => {{ document.title = name + ' - Complete login manually'; }}, clientName);
+    }} catch {{}}
+    await new Promise(() => {{}});
   }}
 }})();
 "#, npm_root = npm_root);
 
-    let tmp_dir = std::env::temp_dir();
-    let script_path = tmp_dir.join(format!("awslh-{}.js", uuid::Uuid::new_v4()));
+            let tmp_dir = std::env::temp_dir();
+            let script_path = tmp_dir.join(format!("awslh-{}.js", uuid::Uuid::new_v4()));
 
-    {{
-        use std::io::Write;
-        let mut file = std::fs::File::create(&script_path).map_err(|e| e.to_string())?;
-        file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
-        drop(file);
-        #[cfg(unix)]
-        {{
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o600)).ok();
-        }}
-    }}
+            if let Ok(mut file) = std::fs::File::create(&script_path) {
+                use std::io::Write;
+                let _ = file.write_all(script.as_bytes());
+                drop(file);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o600)).ok();
+                }
 
-    // Spawn Playwright in background (non-blocking)
-    let script_path_str = script_path.to_string_lossy().to_string();
-    std::process::Command::new(&node_bin)
-        .arg(&script_path_str)
-        .env("AWSLH_VERIFY_URL", &verification_url)
-        .env("AWSLH_EMAIL", &email)
-        .env("AWSLH_PASSWORD", &password)
-        .env("AWSLH_CLIENT_NAME", &client_name)
-        .spawn()
-        .map_err(|e| format!("Failed to start Playwright: {}", e))?;
+                let child = std::process::Command::new(node)
+                    .arg(script_path.to_string_lossy().as_ref())
+                    .env("AWSLH_VERIFY_URL", &verification_url)
+                    .env("AWSLH_EMAIL", &email)
+                    .env("AWSLH_PASSWORD", &password)
+                    .env("AWSLH_CLIENT_NAME", &client_name)
+                    .spawn();
 
-    // Clean up script after delay
-    let path_clone = script_path.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(15));
-        let _ = std::fs::remove_file(&path_clone);
-    });
+                if let Ok(c) = child {
+                    playwright_child = Some(c);
+                }
 
-    // ─── Step 4: Poll for token ────────────────────────────────────
-    let poll_interval_secs = device_auth.interval.unwrap_or(5).max(5);
+                // Clean up script after delay
+                let path_clone = script_path.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    let _ = std::fs::remove_file(&path_clone);
+                });
+            }
+        }
+    }
+
+    // Fallback: if Playwright didn't launch, open default browser
+    if playwright_child.is_none() {
+        let _ = open::that(&verification_url);
+    }
+
+    // ─── Step 4: Poll for token (with browser-close detection) ────
+    let poll_interval_secs = device_auth.interval.unwrap_or(5).max(3);
     let deadline = tokio::time::Instant::now()
-        + tokio::time::Duration::from_secs(device_auth.expires_in);
+        + tokio::time::Duration::from_secs(device_auth.expires_in.min(600)); // Max 10 min
 
     let token = loop {
+        // Check timeout
         if tokio::time::Instant::now() > deadline {
-            return Err("Login timed out — you did not complete authorization in the browser. Please try again.".to_string());
+            if let Some(ref mut child) = playwright_child {
+                let _ = child.kill();
+            }
+            return Err("Login timed out. Please try again.".to_string());
+        }
+
+        // Check if user closed the Playwright browser
+        if let Some(ref mut child) = playwright_child {
+            if let Ok(Some(_exit_status)) = child.try_wait() {
+                // Process exited — browser was closed
+                return Err("Browser was closed. Please try again.".to_string());
+            }
         }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(poll_interval_secs)).await;
@@ -993,27 +1084,39 @@ const {{ chromium }} = require('{npm_root}/playwright');
             "grantType": "urn:ietf:params:oauth:grant-type:device_code"
         });
 
-        let token_resp = http
+        let token_result = http
             .post(format!("{}/token", oidc_endpoint))
             .header("Content-Type", "application/json")
             .json(&token_body)
             .send()
-            .await
-            .map_err(|e| format!("Network error polling for token: {}", e))?;
+            .await;
+
+        // Handle network errors during polling (non-fatal, retry)
+        let token_resp = match token_result {
+            Ok(resp) => resp,
+            Err(e) => {
+                if e.is_timeout() || e.is_connect() {
+                    // Transient network issue, keep trying
+                    continue;
+                }
+                if let Some(ref mut child) = playwright_child {
+                    let _ = child.kill();
+                }
+                return Err(format!("Network lost during login: {}", e));
+            }
+        };
 
         if token_resp.status().is_success() {
-            let token: OidcTokenResponse = token_resp
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse token response: {}", e))?;
+            let token: OidcTokenResponse = token_resp.json().await
+                .map_err(|_| "Failed to parse token from AWS.".to_string())?;
             break token;
         }
 
-        // Parse error to determine if we should keep polling or fail
+        // Parse error
         let err_body = token_resp.text().await.unwrap_or_default();
         let err: OidcError = serde_json::from_str(&err_body).unwrap_or(OidcError {
             error: Some("unknown".to_string()),
-            error_description: Some(err_body.clone()),
+            error_description: Some(err_body),
         });
 
         match err.error.as_deref().unwrap_or("unknown") {
@@ -1023,63 +1126,75 @@ const {{ chromium }} = require('{npm_root}/playwright');
                 continue;
             }
             "expired_token" => {
+                if let Some(ref mut child) = playwright_child {
+                    let _ = child.kill();
+                }
                 return Err("Login session expired. Please try again.".to_string());
             }
             "access_denied" => {
-                return Err("Access denied — authorization was rejected in the browser.".to_string());
+                if let Some(ref mut child) = playwright_child {
+                    let _ = child.kill();
+                }
+                return Err("Access denied — authorization was rejected.".to_string());
             }
-            other => {
-                return Err(format!(
-                    "SSO login error: {} — {}",
-                    other,
-                    err.error_description.unwrap_or_default()
-                ));
+            _ => {
+                if let Some(ref mut child) = playwright_child {
+                    let _ = child.kill();
+                }
+                return Err(format!("Login failed: {}", err.error_description.unwrap_or_default()));
             }
         }
     };
 
-    // ─── Step 5: Cache the SSO token for AWS CLI use ───────────────
-    // Write token to ~/.aws/sso/cache/ so `aws --profile` commands work
-    // File permissions restricted to owner-only (0600) for security
-    let sso_cache_dir = home_dir().join(".aws").join("sso").join("cache");
-    std::fs::create_dir_all(&sso_cache_dir).ok();
-
-    // Restrict directory permissions to owner-only
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&sso_cache_dir, std::fs::Permissions::from_mode(0o700)).ok();
+    // ─── Token received! Kill the Playwright browser ───────────────
+    if let Some(ref mut child) = playwright_child {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
-    let now = chrono::Utc::now();
-    let expires_at = now + chrono::Duration::seconds(token.expires_in as i64);
+    // ─── Step 5: Cache the SSO token (non-fatal if it fails) ──────
+    let cache_result = (|| -> Result<(), String> {
+        let sso_cache_dir = home_dir().join(".aws").join("sso").join("cache");
+        std::fs::create_dir_all(&sso_cache_dir).map_err(|e| e.to_string())?;
 
-    let cache_key = format!("{}{}", registration.client_id, url);
-    let cache_hash = format!("{:x}", sha2::Sha256::digest(cache_key.as_bytes()))[..40].to_string();
-    let cache_file = sso_cache_dir.join(format!("{}.json", cache_hash));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&sso_cache_dir, std::fs::Permissions::from_mode(0o700)).ok();
+        }
 
-    let cache_content = serde_json::json!({
-        "accessToken": token.access_token,
-        "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "region": region,
-        "startUrl": url,
-        "clientId": registration.client_id,
-        "clientSecret": registration.client_secret
-    });
+        let now = chrono::Utc::now();
+        let expires_at = now + chrono::Duration::seconds(token.expires_in as i64);
+        let cache_key = format!("{}{}", registration.client_id, url);
+        let cache_hash = format!("{:x}", sha2::Sha256::digest(cache_key.as_bytes()))[..40].to_string();
+        let cache_file = sso_cache_dir.join(format!("{}.json", cache_hash));
 
-    std::fs::write(&cache_file, serde_json::to_string_pretty(&cache_content).unwrap_or_default()).ok();
+        let cache_content = serde_json::json!({
+            "accessToken": token.access_token,
+            "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "region": region,
+            "startUrl": url,
+            "clientId": registration.client_id,
+            "clientSecret": registration.client_secret
+        });
 
-    // Restrict token file permissions to owner-only (read/write)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cache_file, std::fs::Permissions::from_mode(0o600)).ok();
+        std::fs::write(&cache_file, serde_json::to_string_pretty(&cache_content).unwrap_or_default())
+            .map_err(|e| e.to_string())?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cache_file, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = &cache_result {
+        eprintln!("Warning: Failed to cache SSO token: {}", e);
     }
 
     // ─── Step 6: Open the SSO Access Portal ────────────────────────
-    // This is the page where the user sees all their AWS accounts and roles
-    open::that(&url)
-        .map_err(|e| format!("Login succeeded but failed to open access portal: {}", e))?;
+    let _ = open::that(&url); // Non-fatal if it fails
 
     Ok(LoginResponse {
         success: true,
