@@ -70,45 +70,53 @@ jobs:
           releaseBody: |
             ## AWS Login Hub ${{ github.ref_name }}
 
+            ### What's New
+            - **Hybrid SSO OIDC Login** — Uses AWS OIDC API + Playwright auto-fill
+            - **Browser auto-closes** after MFA completion
+            - **SSO Access Portal** opens automatically after login
+            - **Token cached** at `~/.aws/sso/cache/` for AWS CLI use
+            - **Configurable vault timeout** (1, 2, 8, or 10 hours)
+            - **Improved UI** — always-visible login button, progress indicator, skeleton loading
+
             ### Downloads
             | Platform | File |
             |----------|------|
-            | **Windows** | `.msi` installer (below) |
-            | **macOS (Apple Silicon)** | `.dmg` installer (below) |
-            | **macOS (Intel)** | `.dmg` installer (below) |
-            | **Linux (Ubuntu/Debian)** | `.deb` installer (below) |
-            | **Linux (Fedora/RHEL)** | `.rpm` installer (below) |
-            | **Linux (Portable)** | `.AppImage` (below) |
+            | **Windows (x64)** | `.msi` or `.exe` installer |
+            | **macOS (Apple Silicon)** | `.dmg` (M1/M2/M3/M4) |
+            | **macOS (Intel)** | `.dmg` (x86_64) |
+            | **Linux (Ubuntu/Debian)** | `.deb` |
+            | **Linux (Fedora/RHEL)** | `.rpm` |
+            | **Linux (Portable)** | `.AppImage` |
 
             ### Install
 
-            **Windows:** Download the `.msi` file, double-click to install.
+            **Windows:** Download `.msi`, double-click to install.
 
-            **macOS:** Download the `.dmg` file, open it, drag to Applications.
+            **macOS:** Download `.dmg`, drag to Applications. First launch: System Settings → Privacy & Security → "Open Anyway".
 
-            **Ubuntu/Debian:**
+            **Linux:**
             ```bash
+            # Ubuntu/Debian
             sudo dpkg -i aws-login-hub_*_amd64.deb
-            ```
 
-            **Fedora/RHEL:**
-            ```bash
+            # Fedora/RHEL
             sudo rpm -i aws-login-hub-*.x86_64.rpm
+
+            # Any distro (AppImage)
+            chmod +x aws-login-hub_*.AppImage && ./aws-login-hub_*.AppImage
             ```
 
-            **Any Linux:**
-            ```bash
-            chmod +x aws-login-hub_*.AppImage
-            ./aws-login-hub_*.AppImage
-            ```
-
-            After install, set up Playwright for login automation:
+            ### Post-Install Setup
             ```bash
             npm install -g playwright
             npx playwright install chromium
             ```
 
-            ### Auto-Update
-            If you have a previous version installed, you'll be prompted to update automatically.
+            ### Security
+            - AES-256-GCM encryption with Argon2id key derivation
+            - Credentials passed via env vars, never written to disk
+            - Token cache files have `0600` permissions (owner-only)
+            - Network calls only to `oidc.{region}.amazonaws.com`
+            - MFA is never automated — user enters manually
           releaseDraft: false
           prerelease: false

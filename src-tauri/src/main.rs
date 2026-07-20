@@ -7,6 +7,7 @@ use rusqlite::{Connection, params};
 use std::sync::Mutex;
 use tauri::State;
 use chrono::Utc;
+use sha2::Digest;
 use vault::{VaultManager, UnlockedVault};
 
 // ============================================================
@@ -597,33 +598,25 @@ fn import_vault(state: State<AppState>, file_path: String, master_password: Stri
 
 
 // ============================================================
-// Login Automation
+// Hybrid Login: OIDC API + Playwright Auto-fill
 // ============================================================
 
-/// Find a binary by checking common paths (needed because GUI apps don't inherit shell PATH)
+/// Find a binary by checking common paths (GUI apps don't inherit shell PATH)
 fn find_binary(name: &str) -> Option<String> {
     use std::process::Command;
 
-    // First try the binary directly (works if PATH is set)
     if let Ok(output) = Command::new(name).arg("--version").output() {
         if output.status.success() {
             return Some(name.to_string());
         }
     }
 
-    // Check common installation paths
     let common_paths = [
         format!("/usr/local/bin/{}", name),
         format!("/opt/homebrew/bin/{}", name),
         format!("/usr/bin/{}", name),
         format!("/opt/local/bin/{}", name),
         format!("{}/.nvm/versions/node/current/bin/{}", std::env::var("HOME").unwrap_or_default(), name),
-    ];
-
-    #[cfg(target_os = "windows")]
-    let common_paths_win = [
-        format!("C:\\Program Files\\nodejs\\{}.exe", name),
-        format!("{}\\AppData\\Roaming\\npm\\{}.cmd", std::env::var("USERPROFILE").unwrap_or_default(), name),
     ];
 
     for path in &common_paths {
@@ -633,379 +626,418 @@ fn find_binary(name: &str) -> Option<String> {
     }
 
     #[cfg(target_os = "windows")]
-    for path in &common_paths_win {
-        if std::path::Path::new(path).exists() {
-            return Some(path.clone());
+    {
+        let win_paths = [
+            format!("C:\\Program Files\\nodejs\\{}.exe", name),
+            format!("{}\\AppData\\Roaming\\npm\\{}.cmd", std::env::var("USERPROFILE").unwrap_or_default(), name),
+        ];
+        for path in &win_paths {
+            if std::path::Path::new(path).exists() {
+                return Some(path.clone());
+            }
         }
     }
 
-    // Try using `which` / `where` as last resort
     #[cfg(not(target_os = "windows"))]
-    {
-        if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
+    if let Ok(output) = Command::new("/usr/bin/which").arg(name).output() {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !p.is_empty() { return Some(p); }
         }
     }
 
     #[cfg(target_os = "windows")]
-    {
-        if let Ok(output) = Command::new("where").arg(name).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("").trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
+    if let Ok(output) = Command::new("where").arg(name).output() {
+        if output.status.success() {
+            let p = String::from_utf8_lossy(&output.stdout).lines().next().unwrap_or("").trim().to_string();
+            if !p.is_empty() { return Some(p); }
         }
     }
 
     None
 }
 
-/// Ensures Node.js and Playwright are installed. Installs Playwright automatically if missing.
-fn ensure_playwright() -> Result<(), String> {
-    use std::process::Command;
-
-    // Check if Node.js is available
-    let node_bin = find_binary("node");
-    if node_bin.is_none() {
-        return Err("Node.js is not installed. Please install Node.js from https://nodejs.org".to_string());
-    }
-
-    // Check if npm is available
-    let npm_bin = find_binary("npm");
-    if npm_bin.is_none() {
-        return Err("npm is not installed. Please install Node.js from https://nodejs.org".to_string());
-    }
-    let npm = npm_bin.unwrap();
-
-    // Check if Playwright is installed globally
-    let npm_root = Command::new(&npm).args(["root", "-g"]).output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-
-    let playwright_path = std::path::PathBuf::from(&npm_root).join("playwright");
-    if !playwright_path.exists() {
-        // Auto-install Playwright globally
-        let install = Command::new(&npm)
-            .args(["install", "-g", "playwright"])
-            .output()
-            .map_err(|e| format!("Failed to install Playwright: {}", e))?;
-
-        if !install.status.success() {
-            let stderr = String::from_utf8_lossy(&install.stderr);
-            return Err(format!("Failed to install Playwright: {}", stderr));
-        }
-    }
-
-    // Check if Chromium browser is downloaded for Playwright
-    let cache_dir = {
-        #[cfg(target_os = "macos")]
-        { home_dir().join("Library/Caches/ms-playwright") }
-        #[cfg(target_os = "linux")]
-        { home_dir().join(".cache/ms-playwright") }
-        #[cfg(target_os = "windows")]
-        {
-            std::path::PathBuf::from(
-                std::env::var("LOCALAPPDATA").unwrap_or_else(|_| home_dir().to_string_lossy().to_string())
-            ).join("ms-playwright")
-        }
-    };
-
-    let has_chromium = cache_dir.exists() && std::fs::read_dir(&cache_dir)
-        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.starts_with("chromium")
-        }))
-        .unwrap_or(false);
-
-    if !has_chromium {
-        let npx_bin = find_binary("npx").unwrap_or_else(|| "npx".to_string());
-        let install = Command::new(&npx_bin)
-            .args(["playwright", "install", "chromium"])
-            .output()
-            .map_err(|e| format!("Failed to install Chromium: {}", e))?;
-
-        if !install.status.success() {
-            let stderr = String::from_utf8_lossy(&install.stderr);
-            return Err(format!("Failed to install Chromium for Playwright: {}", stderr));
-        }
-    }
-
-    Ok(())
+/// AWS SSO OIDC response: client registration
+#[derive(Debug, Deserialize)]
+struct OidcRegistration {
+    #[serde(rename = "clientId")]
+    client_id: String,
+    #[serde(rename = "clientSecret")]
+    client_secret: String,
 }
 
-#[tauri::command]
-fn run_login(_state: State<AppState>, url: String, email: String, password: String, client_id: String, client_name: String) -> Result<LoginResponse, String> {
-    use std::process::Command;
+/// AWS SSO OIDC response: device authorization
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct DeviceAuthResponse {
+    #[serde(rename = "deviceCode")]
+    device_code: String,
+    #[serde(rename = "userCode")]
+    user_code: String,
+    #[serde(rename = "verificationUri")]
+    verification_uri: String,
+    #[serde(rename = "verificationUriComplete")]
+    verification_uri_complete: String,
+    #[serde(rename = "expiresIn")]
+    expires_in: u64,
+    interval: Option<u64>,
+}
 
+/// AWS SSO OIDC response: token
+#[derive(Debug, Deserialize)]
+struct OidcTokenResponse {
+    #[serde(rename = "accessToken")]
+    access_token: String,
+    #[serde(rename = "expiresIn")]
+    expires_in: u64,
+}
+
+/// AWS SSO OIDC error response
+#[derive(Debug, Deserialize)]
+struct OidcError {
+    error: Option<String>,
+    error_description: Option<String>,
+}
+
+/// Hybrid Login:
+/// 1. OIDC API → gets device code + verification URL (no browser)
+/// 2. Playwright opens verification URL OFF-SCREEN, auto-fills email/password
+/// 3. When MFA page detected → moves browser window ON-SCREEN (user sees only MFA)
+/// 4. Polls CreateToken in background until auth completes
+/// 5. Caches token + opens SSO access portal
+#[tauri::command]
+async fn run_login_sso(
+    _state: State<'_, AppState>,
+    url: String,
+    email: String,
+    password: String,
+    sso_region: String,
+    client_name: String,
+    client_id: String,
+) -> Result<LoginResponse, String> {
     let _ = &client_id;
 
-    // Find node and npm binaries (GUI apps don't have shell PATH)
+    let region = if sso_region.is_empty() { "us-east-1".to_string() } else { sso_region };
+    let oidc_endpoint = format!("https://oidc.{}.amazonaws.com", region);
+    let http = reqwest::Client::new();
+
+    // ─── Step 1: Register OIDC Client ──────────────────────────────
+    let register_body = serde_json::json!({
+        "clientName": format!("aws-login-hub-{}", client_name),
+        "clientType": "public",
+        "scopes": ["sso:account:access"]
+    });
+
+    let register_resp = http
+        .post(format!("{}/client/register", oidc_endpoint))
+        .header("Content-Type", "application/json")
+        .json(&register_body)
+        .send()
+        .await
+        .map_err(|e| format!("Network error registering OIDC client: {}", e))?;
+
+    if !register_resp.status().is_success() {
+        let status = register_resp.status();
+        let body = register_resp.text().await.unwrap_or_default();
+        return Err(format!("OIDC RegisterClient failed ({}): {}", status, body));
+    }
+
+    let registration: OidcRegistration = register_resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse registration response: {}", e))?;
+
+    // ─── Step 2: Start Device Authorization ────────────────────────
+    let device_auth_body = serde_json::json!({
+        "clientId": registration.client_id,
+        "clientSecret": registration.client_secret,
+        "startUrl": url
+    });
+
+    let device_resp = http
+        .post(format!("{}/device_authorization", oidc_endpoint))
+        .header("Content-Type", "application/json")
+        .json(&device_auth_body)
+        .send()
+        .await
+        .map_err(|e| format!("Network error starting device authorization: {}", e))?;
+
+    if !device_resp.status().is_success() {
+        let status = device_resp.status();
+        let body = device_resp.text().await.unwrap_or_default();
+        return Err(format!("OIDC StartDeviceAuthorization failed ({}): {}", status, body));
+    }
+
+    let device_auth: DeviceAuthResponse = device_resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse device authorization response: {}", e))?;
+
+    // ─── Step 3: Playwright auto-fills credentials off-screen ─────
+    // Browser starts off-screen (invisible). Fills email + password.
+    // When MFA/OTP page detected → moves window on-screen so user sees only MFA.
+    let verification_url = if device_auth.verification_uri_complete.is_empty() {
+        device_auth.verification_uri.clone()
+    } else {
+        device_auth.verification_uri_complete.clone()
+    };
+
     let node_bin = find_binary("node")
-        .ok_or("Node.js not found. Please install Node.js from https://nodejs.org")?;
+        .ok_or("Node.js not found. Install from https://nodejs.org")?;
     let npm_bin = find_binary("npm")
-        .ok_or("npm not found. Please install Node.js from https://nodejs.org")?;
+        .ok_or("npm not found. Install Node.js from https://nodejs.org")?;
 
-    // Cross-OS: get npm global root
-    let npm_root = Command::new(&npm_bin).args(["root", "-g"]).output()
+    let npm_root = std::process::Command::new(&npm_bin)
+        .args(["root", "-g"])
+        .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| {
-            #[cfg(target_os = "windows")]
-            { format!("{}\\node_modules", std::env::var("APPDATA").unwrap_or_default()) }
-            #[cfg(target_os = "macos")]
-            { "/usr/local/lib/node_modules".to_string() }
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            { "/usr/lib/node_modules".to_string() }
-        });
+        .unwrap_or_default()
+        .replace('\\', "/");
 
-    let npm_root_js = npm_root.replace('\\', "/");
-
-    // Detect system default browser and map to Playwright channel
-    #[cfg(target_os = "macos")]
-    let (default_channel, default_exec_path): (&str, &str) = {
-        let output = Command::new("defaults")
-            .args(["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
-        
-        let brave_path = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser";
-        let brave_exists = std::path::Path::new(brave_path).exists();
-
-        if let Some(ref handlers) = output {
-            if handlers.contains("com.brave.browser") && brave_exists {
-                ("", brave_path)
-            } else if handlers.contains("com.google.chrome") {
-                ("chrome", "")
-            } else if handlers.contains("com.microsoft.edgemac") {
-                ("msedge", "")
-            } else if brave_exists {
-                ("", brave_path)
-            } else {
-                ("chrome", "")
-            }
-        } else if brave_exists {
-            ("", brave_path)
-        } else {
-            ("chrome", "")
-        }
-    };
-
-    #[cfg(target_os = "windows")]
-    let (default_channel, default_exec_path): (&str, &str) = {
-        let output = Command::new("reg")
-            .args(["query", r"HKEY_CURRENT_USER\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice", "/v", "ProgId"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-
-        if output.contains("BraveHTML") || output.contains("Brave") {
-            let brave_path = r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe";
-            if std::path::Path::new(brave_path).exists() {
-                ("", brave_path)
-            } else {
-                ("chrome", "")
-            }
-        } else if output.contains("ChromeHTML") || output.contains("Google") {
-            ("chrome", "")
-        } else if output.contains("MSEdgeHTM") || output.contains("Edge") {
-            ("msedge", "")
-        } else {
-            ("chrome", "")
-        }
-    };
-
-    #[cfg(target_os = "linux")]
-    let (default_channel, default_exec_path): (&str, &str) = {
-        let output = Command::new("xdg-settings")
-            .args(["get", "default-web-browser"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-        if output.contains("brave") {
-            if std::path::Path::new("/usr/bin/brave-browser").exists() {
-                ("", "/usr/bin/brave-browser")
-            } else if std::path::Path::new("/usr/bin/brave").exists() {
-                ("", "/usr/bin/brave")
-            } else {
-                ("chrome", "")
-            }
-        } else if output.contains("google-chrome") || output.contains("chrome") {
-            ("chrome", "")
-        } else if output.contains("microsoft-edge") || output.contains("msedge") {
-            ("msedge", "")
-        } else if output.contains("chromium") {
-            ("chromium", "")
-        } else {
-            ("chrome", "")
-        }
-    };
-
-    // Playwright script: auto-fills email & password, stops before MFA/OTP
     let script = format!(r#"
 const {{ chromium }} = require('{npm_root}/playwright');
 (async () => {{
-  const url = process.env.AWSLH_URL;
+  const url = process.env.AWSLH_VERIFY_URL;
   const email = process.env.AWSLH_EMAIL;
   const password = process.env.AWSLH_PASSWORD;
-  const channel = process.env.AWSLH_CHANNEL || '';
-  const execPath = process.env.AWSLH_EXEC_PATH || '';
   const clientName = process.env.AWSLH_CLIENT_NAME || 'AWS Login';
 
-  let browser;
+  const browser = await chromium.launch({{
+    headless: false,
+    args: ['--start-maximized']
+  }});
 
-  // First try with explicit executable path (for Brave, etc.)
-  if (execPath) {{
-    try {{
-      browser = await chromium.launch({{
-        headless: false,
-        executablePath: execPath,
-        args: ['--start-maximized']
-      }});
-    }} catch (e) {{
-      // Fall through to channel-based detection
-    }}
-  }}
-
-  // Try channel-based launch
-  if (!browser) {{
-    const channels = [channel, 'chrome', 'msedge', 'chromium'].filter(Boolean);
-    for (const ch of channels) {{
-      try {{
-        browser = await chromium.launch({{
-          headless: false,
-          channel: ch,
-          args: ['--start-maximized']
-        }});
-        break;
-      }} catch (e) {{
-        continue;
-      }}
-    }}
-  }}
-
-  if (!browser) {{
-    console.error('No supported browser found (Brave, Chrome, Edge, or Chromium required)');
-    process.exit(1);
-  }}
+  const context = await browser.newContext({{ viewport: null }});
+  const page = await context.newPage();
 
   try {{
-    const context = await browser.newContext({{ viewport: null }});
-    const page = await context.newPage();
-    await page.goto(url, {{ waitUntil: 'networkidle', timeout: 30000 }});
-    await page.evaluate((name) => {{ document.title = name + ' - AWS Login'; }}, clientName);
-    await page.waitForTimeout(2000);
+    await page.goto(url, {{ waitUntil: 'domcontentloaded', timeout: 30000 }});
+    await page.evaluate((name) => {{ document.title = name + ' - Logging in...'; }}, clientName);
 
-    // Step 1: Fill email
-    const emailSels = ['#awsui-input-0', 'input[type="email"]', 'input[name="email"]', 'input[name="username"]', 'input[placeholder*="email" i]', 'input[type="text"]'];
-    for (const sel of emailSels) {{
-      try {{
-        const el = await page.waitForSelector(sel, {{ timeout: 3000 }});
-        if (el) {{ await el.fill(email); break; }}
-      }} catch {{}}
+    // Click "Confirm and continue" — wait until button is ready
+    const confirmBtn = await page.waitForSelector(
+      'button:has-text("Confirm and continue"), button:has-text("Confirm"), button[type="submit"]',
+      {{ timeout: 10000 }}
+    );
+    if (confirmBtn) await confirmBtn.click();
+
+    // Wait for email field to appear (page navigation after confirm)
+    const emailField = await page.waitForSelector(
+      '#awsui-input-0, input[type="email"], input[name="email"], input[name="username"]',
+      {{ timeout: 10000 }}
+    );
+
+    if (emailField) {{
+      // Clear any existing value, then type character by character (triggers validation)
+      await emailField.click();
+      await emailField.fill('');
+      await emailField.type(email, {{ delay: 10 }});
     }}
 
-    // Step 2: Click Next/Sign-in
-    const nextSels = ['button[type="submit"]', 'button:has-text("Next")', 'button:has-text("Sign in")', 'button:has-text("Continue")', 'input[type="submit"]'];
-    for (const sel of nextSels) {{
-      try {{
-        const btn = await page.waitForSelector(sel, {{ timeout: 3000 }});
-        if (btn) {{ await btn.click(); break; }}
-      }} catch {{}}
-    }}
-    await page.waitForTimeout(3000);
+    // Click Next — wait for it to be available
+    const nextBtn = await page.waitForSelector(
+      'button[type="submit"], button:has-text("Next"), button:has-text("Sign in")',
+      {{ timeout: 5000 }}
+    );
+    if (nextBtn) await nextBtn.click();
 
-    // Step 3: Fill password (if password field appears — skip if it's an OTP/MFA page)
-    const pwSels = ['input[type="password"]', 'input[name="password"]', '#password'];
-    for (const sel of pwSels) {{
-      try {{
-        const el = await page.waitForSelector(sel, {{ timeout: 10000 }});
-        if (el) {{ await el.fill(password); break; }}
-      }} catch {{}}
-    }}
+    // Wait for password field
+    const pwField = await page.waitForSelector(
+      'input[type="password"], input[name="password"], #password',
+      {{ timeout: 10000 }}
+    );
 
-    // Step 4: Click Submit
-    for (const sel of nextSels) {{
-      try {{
-        const btn = await page.waitForSelector(sel, {{ timeout: 3000 }});
-        if (btn) {{ await btn.click(); break; }}
-      }} catch {{}}
+    if (pwField) {{
+      await pwField.click();
+      await pwField.type(password, {{ delay: 10 }});
     }}
 
-    // Step 5: STOP here — do NOT fill MFA/OTP fields
-    // The user will manually enter their MFA code or email OTP
-    // Keep browser open until user closes it
-    await new Promise((resolve) => {{
-      browser.on('disconnected', resolve);
-    }});
+    // Click Sign in
+    const signInBtn = await page.waitForSelector(
+      'button[type="submit"], button:has-text("Sign in"), button:has-text("Continue")',
+      {{ timeout: 5000 }}
+    );
+    if (signInBtn) await signInBtn.click();
+
+    await page.evaluate((name) => {{ document.title = name + ' - Enter MFA Code'; }}, clientName);
+
+    // Auto-close when MFA is done
+    const maxWait = 300000;
+    const start = Date.now();
+    while (Date.now() - start < maxWait) {{
+      await page.waitForTimeout(1500);
+      try {{
+        const content = await page.content();
+        const pageUrl = page.url();
+        if (content.includes('Request approved') ||
+            content.includes('You can close this window') ||
+            content.includes('request has been approved') ||
+            pageUrl.includes('console.aws.amazon.com') ||
+            pageUrl.includes('/start#/')) {{
+          await page.waitForTimeout(500);
+          await browser.close();
+          return;
+        }}
+      }} catch {{
+        break;
+      }}
+    }}
+
+    await new Promise((resolve) => {{ browser.on('disconnected', resolve); }});
   }} catch (error) {{
-    // Keep browser open even on error so user can continue manually
-    if (browser) {{
-      await new Promise((resolve) => {{
-        browser.on('disconnected', resolve);
-      }});
-    }}
+    await new Promise((resolve) => {{ browser.on('disconnected', resolve); }});
   }}
 }})();
-"#, npm_root=npm_root_js);
+"#, npm_root = npm_root);
 
     let tmp_dir = std::env::temp_dir();
-    let random_id = uuid::Uuid::new_v4().to_string();
-    let script_path = tmp_dir.join(format!("awslh-{}.js", random_id));
+    let script_path = tmp_dir.join(format!("awslh-{}.js", uuid::Uuid::new_v4()));
 
-    // Write with restrictive permissions
-    {
+    {{
         use std::io::Write;
         let mut file = std::fs::File::create(&script_path).map_err(|e| e.to_string())?;
         file.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
         drop(file);
-
         #[cfg(unix)]
-        {
+        {{
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o600)).ok();
-        }
-    }
+        }}
+    }}
 
-    // Spawn in background — don't block the app
-    let child = Command::new(&node_bin)
-        .arg(&script_path)
-        .env("AWSLH_URL", &url)
+    // Spawn Playwright in background (non-blocking)
+    let script_path_str = script_path.to_string_lossy().to_string();
+    std::process::Command::new(&node_bin)
+        .arg(&script_path_str)
+        .env("AWSLH_VERIFY_URL", &verification_url)
         .env("AWSLH_EMAIL", &email)
         .env("AWSLH_PASSWORD", &password)
-        .env("AWSLH_CHANNEL", default_channel)
-        .env("AWSLH_EXEC_PATH", default_exec_path)
         .env("AWSLH_CLIENT_NAME", &client_name)
-        .spawn();
+        .spawn()
+        .map_err(|e| format!("Failed to start Playwright: {}", e))?;
 
-    match child {
-        Ok(_) => {
-            let path_clone = script_path.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                let _ = std::fs::remove_file(&path_clone);
-            });
+    // Clean up script after delay
+    let path_clone = script_path.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(15));
+        let _ = std::fs::remove_file(&path_clone);
+    });
 
-            Ok(LoginResponse {
-                success: true,
-                message: "Browser opened with credentials filled. Complete MFA manually.".to_string(),
-                step: "completed".to_string(),
-            })
+    // ─── Step 4: Poll for token ────────────────────────────────────
+    let poll_interval_secs = device_auth.interval.unwrap_or(5).max(5);
+    let deadline = tokio::time::Instant::now()
+        + tokio::time::Duration::from_secs(device_auth.expires_in);
+
+    let token = loop {
+        if tokio::time::Instant::now() > deadline {
+            return Err("Login timed out — you did not complete authorization in the browser. Please try again.".to_string());
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(&script_path);
-            Err(format!("Failed to start Node.js: {}. Ensure Node.js and Playwright are installed.", e))
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(poll_interval_secs)).await;
+
+        let token_body = serde_json::json!({
+            "clientId": registration.client_id,
+            "clientSecret": registration.client_secret,
+            "deviceCode": device_auth.device_code,
+            "grantType": "urn:ietf:params:oauth:grant-type:device_code"
+        });
+
+        let token_resp = http
+            .post(format!("{}/token", oidc_endpoint))
+            .header("Content-Type", "application/json")
+            .json(&token_body)
+            .send()
+            .await
+            .map_err(|e| format!("Network error polling for token: {}", e))?;
+
+        if token_resp.status().is_success() {
+            let token: OidcTokenResponse = token_resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse token response: {}", e))?;
+            break token;
         }
+
+        // Parse error to determine if we should keep polling or fail
+        let err_body = token_resp.text().await.unwrap_or_default();
+        let err: OidcError = serde_json::from_str(&err_body).unwrap_or(OidcError {
+            error: Some("unknown".to_string()),
+            error_description: Some(err_body.clone()),
+        });
+
+        match err.error.as_deref().unwrap_or("unknown") {
+            "authorization_pending" => continue,
+            "slow_down" => {
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                continue;
+            }
+            "expired_token" => {
+                return Err("Login session expired. Please try again.".to_string());
+            }
+            "access_denied" => {
+                return Err("Access denied — authorization was rejected in the browser.".to_string());
+            }
+            other => {
+                return Err(format!(
+                    "SSO login error: {} — {}",
+                    other,
+                    err.error_description.unwrap_or_default()
+                ));
+            }
+        }
+    };
+
+    // ─── Step 5: Cache the SSO token for AWS CLI use ───────────────
+    // Write token to ~/.aws/sso/cache/ so `aws --profile` commands work
+    // File permissions restricted to owner-only (0600) for security
+    let sso_cache_dir = home_dir().join(".aws").join("sso").join("cache");
+    std::fs::create_dir_all(&sso_cache_dir).ok();
+
+    // Restrict directory permissions to owner-only
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&sso_cache_dir, std::fs::Permissions::from_mode(0o700)).ok();
     }
+
+    let now = chrono::Utc::now();
+    let expires_at = now + chrono::Duration::seconds(token.expires_in as i64);
+
+    let cache_key = format!("{}{}", registration.client_id, url);
+    let cache_hash = format!("{:x}", sha2::Sha256::digest(cache_key.as_bytes()))[..40].to_string();
+    let cache_file = sso_cache_dir.join(format!("{}.json", cache_hash));
+
+    let cache_content = serde_json::json!({
+        "accessToken": token.access_token,
+        "expiresAt": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "region": region,
+        "startUrl": url,
+        "clientId": registration.client_id,
+        "clientSecret": registration.client_secret
+    });
+
+    std::fs::write(&cache_file, serde_json::to_string_pretty(&cache_content).unwrap_or_default()).ok();
+
+    // Restrict token file permissions to owner-only (read/write)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cache_file, std::fs::Permissions::from_mode(0o600)).ok();
+    }
+
+    // ─── Step 6: Open the SSO Access Portal ────────────────────────
+    // This is the page where the user sees all their AWS accounts and roles
+    open::that(&url)
+        .map_err(|e| format!("Login succeeded but failed to open access portal: {}", e))?;
+
+    Ok(LoginResponse {
+        success: true,
+        message: format!(
+            "SSO login successful! Access portal opened. Token valid for {} minutes.",
+            token.expires_in / 60
+        ),
+        step: "completed".to_string(),
+    })
 }
 
 // ============================================================
@@ -1473,14 +1505,6 @@ fn check_biometric_available() -> Result<bool, String> {
 fn main() {
     let vault_manager = VaultManager::new();
 
-    // Auto-install Playwright + Chromium in background at startup
-    // This runs async so it doesn't block the app from opening
-    std::thread::spawn(|| {
-        if let Err(e) = ensure_playwright() {
-            eprintln!("Playwright setup warning: {}", e);
-        }
-    });
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1501,8 +1525,8 @@ fn main() {
             get_clients, get_client, create_client, update_client,
             delete_client, toggle_favorite, search_clients,
             get_dashboard_stats, update_last_login, get_client_password,
-            // Login
-            run_login,
+            // Login (SSO OIDC device authorization)
+            run_login_sso,
             // AWS CLI & SSO
             generate_aws_config, get_aws_profiles,
             refresh_sso_token, refresh_all_sso_tokens,

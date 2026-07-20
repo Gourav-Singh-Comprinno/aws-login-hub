@@ -47,8 +47,13 @@ function App() {
   }
 
   useEffect(() => {
+    function getTimeoutMs() {
+      const hrs = parseInt(localStorage.getItem("vault_timeout_hrs") || "2", 10);
+      return hrs * 60 * 60 * 1000;
+    }
+
     const checkIdle = setInterval(() => {
-      if (unlocked && Date.now() - lastActivityRef.current > 15 * 60 * 1000) {
+      if (unlocked && Date.now() - lastActivityRef.current > getTimeoutMs()) {
         api.lockVault().then(() => {
           setUnlocked(false);
           setCurrentUser(null);
@@ -56,7 +61,15 @@ function App() {
         });
       }
     }, 30000);
-    return () => clearInterval(checkIdle);
+
+    // Listen for timeout changes from Settings
+    const handleTimeoutChange = () => {};
+    window.addEventListener("vault-timeout-changed", handleTimeoutChange);
+
+    return () => {
+      clearInterval(checkIdle);
+      window.removeEventListener("vault-timeout-changed", handleTimeoutChange);
+    };
   }, [unlocked]);
 
   useEffect(() => {

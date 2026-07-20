@@ -1,25 +1,41 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-ssr
+target
+
 # Logs
 logs
 *.log
 npm-debug.log*
 yarn-debug.log*
-yarn-error.log*
 pnpm-debug.log*
-lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# Environment & secrets
+.env
+.env.*
 *.local
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+# Editor & IDE
+.vscode
 .idea
-.DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Vault data (never commit user credentials)
+*.vault.enc
+*.vault-backup
+*.last_auth
+
+# Tauri build artifacts
+src-tauri/target
+src-tauri/gen/schemas

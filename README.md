@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.7.1-blue?style=flat-square" />
+  <img src="https://img.shields.io/badge/version-1.8.0-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" />
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?style=flat-square" />
-  <img src="https://img.shields.io/github/downloads/Gourav-Singh-Comprinno/aws-login-hub/total?style=flat-square&label=downloads" />
+  <img src="https://img.shields.io/badge/login-SSO%20OIDC%20%2B%20Auto--fill-orange?style=flat-square" />
 </p>
 
 <h1 align="center">AWS Login Hub</h1>
 
 <p align="center">
-  One-click login for multiple AWS Identity Center accounts.<br>
-  Encrypted vault. Auto-fill credentials. Uses your Chrome.
+  One-click SSO login for multiple AWS Identity Center accounts.<br>
+  Encrypted vault • Auto-fill credentials • MFA-only browser interaction.
 </p>
 
 <p align="center">
@@ -20,11 +20,44 @@
 
 ## How It Works
 
-1. Add your AWS SSO client (name, URL, email, password)
-2. Click **Login** → Chrome opens → email & password auto-filled
-3. Complete MFA → you're in the AWS Console
+1. Add your AWS SSO client (name, URL, email, password, region)
+2. Click **Login** → app calls AWS SSO OIDC API → browser opens with credentials auto-filled
+3. Complete MFA → browser closes automatically → you're in the AWS Console
 
-That's it. Your credentials are stored in an AES-256-GCM encrypted vault on your machine. Nothing leaves your computer.
+Your credentials are stored in an AES-256-GCM encrypted vault on your machine. Nothing leaves your computer except calls to official AWS endpoints.
+
+---
+
+## Login Flow (Hybrid SSO OIDC + Auto-fill)
+
+```
+┌─────────────────┐     ┌─────────────────────┐     ┌──────────────┐
+│  AWS Login Hub  │     │  AWS SSO OIDC API    │     │   Browser    │
+└────────┬────────┘     └──────────┬──────────┘     └──────┬───────┘
+         │                         │                        │
+         │ 1. RegisterClient       │                        │
+         │────────────────────────>│                        │
+         │                         │                        │
+         │ 2. StartDeviceAuth      │                        │
+         │────────────────────────>│                        │
+         │   (verification URL)    │                        │
+         │<────────────────────────│                        │
+         │                         │                        │
+         │ 3. Open browser + auto-fill email/password       │
+         │─────────────────────────────────────────────────>│
+         │                         │                        │
+         │                         │    4. User enters MFA  │
+         │                         │                        │
+         │ 5. Poll CreateToken     │                        │
+         │────────────────────────>│                        │
+         │   accessToken ✓         │                        │
+         │<────────────────────────│                        │
+         │                         │                        │
+         │ 6. Cache token + open SSO portal                 │
+         │─────────────────────────────────────────────────>│
+```
+
+**What the user sees:** Browser opens → credentials fill automatically → MFA prompt appears → enter code → portal opens with all accounts.
 
 ---
 
@@ -48,7 +81,7 @@ Go to the [Releases page](https://github.com/Gourav-Singh-Comprinno/aws-login-hu
 
 ### Windows
 
-1. Download `AWS.Login.Hub_x64-setup.exe`
+1. Download `AWS.Login.Hub_x64-setup.exe` or `.msi`
 2. Double-click to install
 3. Find "AWS Login Hub" in your Start Menu
 
@@ -59,33 +92,35 @@ Go to the [Releases page](https://github.com/Gourav-Singh-Comprinno/aws-login-hu
 3. First launch: System Settings → Privacy & Security → "Open Anyway"
 4. Or run: `xattr -cr /Applications/AWS\ Login\ Hub.app`
 
+### macOS (Intel)
+
+1. Download `AWS.Login.Hub_x64.dmg`
+2. Same steps as above
+
 ### Linux (Ubuntu / Debian)
 
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/AWS.Login.Hub_1.7.1_amd64.deb
-sudo dpkg -i AWS.Login.Hub_1.7.1_amd64.deb
+sudo dpkg -i aws-login-hub_*_amd64.deb
 ```
 
 ### Linux (Fedora / RHEL)
 
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/AWS.Login.Hub-1.7.1-1.x86_64.rpm
-sudo rpm -i AWS.Login.Hub-1.7.1-1.x86_64.rpm
+sudo rpm -i aws-login-hub-*.x86_64.rpm
 ```
 
 ### Linux (AppImage — Any Distro)
 
 ```bash
-wget https://github.com/Gourav-Singh-Comprinno/aws-login-hub/releases/latest/download/AWS.Login.Hub_1.7.1_amd64.AppImage
-chmod +x AWS.Login.Hub_1.7.1_amd64.AppImage
-./AWS.Login.Hub_1.7.1_amd64.AppImage
+chmod +x aws-login-hub_*.AppImage
+./aws-login-hub_*.AppImage
 ```
 
 ---
 
 ## Setup After Install
 
-Install Playwright (required for auto-fill):
+Install Playwright (required for credential auto-fill):
 
 ```bash
 npm install -g playwright
@@ -101,16 +136,18 @@ sudo ln -sf $(which node) /usr/local/bin/node
 
 ## Features
 
-### One-Click Login
-- Click Login → your Chrome opens → email & password auto-filled
-- You only complete MFA manually
-- App stays usable while browser is open (non-blocking)
-- Falls back to Edge if Chrome not found
+### Hybrid SSO Login (OIDC API + Auto-fill)
+- Calls AWS SSO OIDC API to initiate device authorization
+- Playwright auto-fills email & password from your encrypted vault
+- Browser only becomes visible at the MFA/OTP step
+- Browser auto-closes after MFA is completed
+- SSO token cached at `~/.aws/sso/cache/` (works with AWS CLI)
+- SSO Access Portal opens automatically after login
 
 ### Encrypted Vault
 - AES-256-GCM encryption with Argon2id key derivation
 - Passwords never stored in plaintext
-- Vault auto-locks after 15 minutes of inactivity
+- Configurable auto-lock timeout (1, 2, 8, or 10 hours)
 - Master password never stored — only used to derive encryption key
 
 ### Multi-User Isolation
@@ -124,9 +161,9 @@ sudo ln -sf $(which node) /usr/local/bin/node
 - One-click update + relaunch
 
 ### Cross-Platform
-- Windows, macOS (Apple Silicon), Linux
-- Uses your machine's installed Chrome (not a bundled browser)
-- All data stored locally — zero network calls
+- Windows (x64), macOS (Apple Silicon + Intel), Linux (deb/rpm/AppImage)
+- All data stored locally — only network calls go to AWS SSO OIDC endpoints
+- Uses Playwright Chromium for auto-fill (cross-platform)
 
 ---
 
@@ -138,10 +175,12 @@ sudo ln -sf $(which node) /usr/local/bin/node
 | Key derivation | Argon2id (memory-hard, resistant to GPU attacks) |
 | Master password | Never stored. Only used to derive the encryption key. |
 | Memory | Keys zeroed from RAM on vault lock (zeroize crate) |
-| Credentials | Passed via environment variables, never written to disk |
-| Network | Zero network calls. All data is local. |
-| CSP | Content Security Policy enabled |
-| MFA | Never bypassed or automated |
+| Credentials | Passed via environment variables to Playwright, never written to disk |
+| Network calls | Only to `oidc.{region}.amazonaws.com` — official AWS endpoints |
+| Token cache | Stored with `0600` file permissions (owner-only read/write) |
+| CSP | Content Security Policy enabled in Tauri |
+| MFA | Never bypassed or automated — user enters manually |
+| Auto-lock | Vault locks after configurable idle timeout |
 
 ---
 
@@ -153,7 +192,34 @@ sudo ln -sf $(which node) /usr/local/bin/node
 ├── <user>.vault.enc        Encrypted credentials (AES-256-GCM)
 ├── <user>.db               Client metadata (SQLite)
 └── <user>.last_auth        Password expiration timestamp
+
+~/.aws/sso/cache/
+└── <hash>.json             Cached SSO tokens (auto-generated after login)
 ```
+
+---
+
+## Configuration
+
+### Add a Client
+
+Only 5 fields required:
+
+| Field | Description |
+|-------|-------------|
+| Client Name | Friendly name (e.g., "Production") |
+| Identity Center URL | Your SSO start URL (e.g., `https://d-xxxxxxxxxx.awsapps.com/start`) |
+| Email | Identity Center email address |
+| Password | Identity Center password (stored encrypted in vault) |
+| SSO Region | AWS region of your Identity Center (dropdown with all regions) |
+
+### Vault Timeout
+
+Configurable in Settings → Security → Auto-Lock Timeout:
+- 1 hour
+- 2 hours (default)
+- 8 hours
+- 10 hours
 
 ---
 
@@ -162,7 +228,7 @@ sudo ln -sf $(which node) /usr/local/bin/node
 ### Prerequisites
 - Node.js 18+
 - Rust 1.77+
-- Playwright (`npm install -g playwright`)
+- Playwright (`npm install -g playwright && npx playwright install chromium`)
 
 ### Linux
 ```bash
@@ -189,6 +255,27 @@ cd aws-login-hub
 npm install
 npm run tauri build
 ```
+
+---
+
+## CI/CD Pipeline
+
+The GitHub Actions workflow (`.github/workflows/build.yml`) builds for all platforms on tag push:
+
+| Platform | Target | Output |
+|----------|--------|--------|
+| Ubuntu 22.04 | `x86_64-unknown-linux-gnu` | `.deb`, `.rpm`, `.AppImage` |
+| Windows Latest | `x86_64-pc-windows-msvc` | `.msi`, `.exe` |
+| macOS Latest | `aarch64-apple-darwin` | `.dmg` (Apple Silicon) |
+| macOS 13 | `x86_64-apple-darwin` | `.dmg` (Intel) |
+
+### Trigger a release:
+```bash
+git tag v1.7.1
+git push origin v1.7.1
+```
+
+The pipeline runs: `npm install` → `tsc --noEmit` → `cargo test` → `cargo clippy` → `tauri build` → GitHub Release with all artifacts.
 
 ---
 
@@ -224,9 +311,10 @@ cargo test
 | Framework | Tauri 2 (Rust backend + Web frontend) |
 | Frontend | React 19, TypeScript, Tailwind CSS 4, Framer Motion |
 | Encryption | aes-gcm, argon2, zeroize (Rust crates) |
+| SSO Auth | AWS SSO OIDC API (reqwest + tokio) |
 | Database | SQLite (per-user) |
-| Login Automation | Playwright (uses your installed Chrome) |
-| Platforms | Windows, macOS (Apple Silicon), Linux |
+| Auto-fill | Playwright (types credentials into browser) |
+| Platforms | Windows, macOS (ARM + Intel), Linux |
 
 ---
 

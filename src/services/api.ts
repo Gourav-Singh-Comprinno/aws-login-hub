@@ -42,9 +42,9 @@ export const api = {
   async updateLastLogin(id: string): Promise<void> { return invoke("update_last_login", { id }); },
   async getClientPassword(id: string): Promise<string> { return invoke("get_client_password", { id }); },
 
-  // Login (opens Chrome with auto-fill, non-blocking)
-  async runLogin(url: string, email: string, password: string, clientId: string, clientName: string): Promise<{ success: boolean; message: string }> {
-    return invoke("run_login", { url, email, password, clientId, clientName });
+  // Login (SSO OIDC device authorization — opens browser for verification)
+  async runLoginSso(url: string, email: string, password: string, ssoRegion: string, clientName: string, clientId: string): Promise<{ success: boolean; message: string }> {
+    return invoke("run_login_sso", { url, email, password, ssoRegion, clientName, clientId });
   },
 
   // AWS CLI & SSO

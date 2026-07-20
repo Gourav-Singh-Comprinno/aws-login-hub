@@ -1,6 +1,6 @@
 [package]
 name = "aws-login-hub"
-version = "1.7.1"
+version = "1.8.0"
 description = "AWS Identity Center Login Hub - Desktop Application"
 authors = ["Gourav Singh"]
 edition = "2021"
@@ -26,3 +26,7 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 hex = "0.4"
+# SSO OIDC login
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+open = "5"
