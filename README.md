@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.0-blue?style=flat-square" />
+  <img src="https://img.shields.io/badge/version-1.8.1-blue?style=flat-square" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?style=flat-square" />
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?style=flat-square" />
   <img src="https://img.shields.io/badge/login-SSO%20OIDC%20%2B%20Auto--fill-orange?style=flat-square" />

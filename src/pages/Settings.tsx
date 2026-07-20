@@ -198,7 +198,7 @@ export default function SettingsPage({ currentUser, onLock }: SettingsProps) {
             <div className="grid grid-cols-3 gap-3">
               <div className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center">
                 <p className="text-[11px] text-zinc-500 uppercase tracking-wider">Version</p>
-                <p className="text-[14px] text-white mt-1 font-semibold">1.8.0</p>
+                <p className="text-[14px] text-white mt-1 font-semibold">1.8.1</p>
               </div>
               <div className="p-3 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center">
                 <p className="text-[11px] text-zinc-500 uppercase tracking-wider">Platform</p>

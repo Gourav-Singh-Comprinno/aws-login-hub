@@ -1,6 +1,6 @@
 [package]
 name = "aws-login-hub"
-version = "1.8.0"
+version = "1.8.1"
 description = "AWS Identity Center Login Hub - Desktop Application"
 authors = ["Gourav Singh"]
 edition = "2021"
